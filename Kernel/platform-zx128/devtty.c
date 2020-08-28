@@ -7,7 +7,7 @@
 #include <vt.h>
 #include <tty.h>
 
-char tbuf1[TTYSIZ];
+static char tbuf1[TTYSIZ];
 
 uint8_t vtattr_cap;
 struct vt_repeat keyrepeat;
@@ -90,6 +90,10 @@ void tty_setup(uint8_t minor)
 void tty_sleeping(uint8_t minor)
 {
 	minor;
+}
+
+void tty_data_consumed(uint8_t minor)
+{
 }
 
 void update_keyboard(void)

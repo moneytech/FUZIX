@@ -8,17 +8,23 @@
             .globl init_early
             .globl init_hardware
             .globl _program_vectors
+	    .globl map_buffers
 	    .globl map_kernel
 	    .globl map_process
 	    .globl map_process_always
-	    .globl _need_resched
-	    .globl map_save
+	    .globl map_kernel_di
+	    .globl map_process_di
+	    .globl map_process_always_di
+	    .globl _int_disabled
+	    .globl map_save_kernel
 	    .globl map_restore
+	    .globl map_for_swap
+	    .globl map_process_a
 	    .globl platform_interrupt_all
 
             ; exported debugging tools
-            .globl _trap_monitor
-            .globl _trap_reboot
+            .globl _platform_monitor
+            .globl _platform_reboot
             .globl outchar
 	    .globl _bugout
 
@@ -27,6 +33,7 @@
 	    .globl _scroll_down
 	    .globl _cursor_on
 	    .globl _cursor_off
+	    .globl _cursor_disable
 	    .globl _plot_char
 	    .globl _do_beep
 	    .globl _clear_lines
@@ -41,6 +48,7 @@
             .globl interrupt_handler
             .globl unix_syscall_entry
 	    .globl _vtinit
+	    .globl _is_joyce
 
 	    ; debug symbols
             .globl outcharhex
@@ -50,7 +58,7 @@
             .globl outstringhex
 
             .include "kernel.def"
-            .include "../kernel.def"
+            .include "../kernel-z80.def"
 
 ; -----------------------------------------------------------------------------
 ; VIDEO MEMORY BANK (0x4000-0xBFFF during video work)
@@ -67,14 +75,14 @@ font8x8	    .equ	0x9C00		; font loaded after framebuffer
 ;
 ;	Ask the controller to reboot
 ;
-_trap_reboot:
+_platform_reboot:
 	    ld a, #0x01
 	    out (0xF8), a
             ; should never get here
-_trap_monitor:
+_platform_monitor:
 	    di
 	    halt
-	    jr _trap_monitor
+	    jr _platform_monitor
 
 platform_interrupt_all:
 	    ret
@@ -85,19 +93,29 @@ platform_interrupt_all:
             .area _CODE
 
 init_early:
-	    ld b, #'U'
-	    call _bugoutv
-	    call _vtinit
             ret
 
+; FIXME: can we move init_hardware into discard ?
 init_hardware:
             ; set system RAM size
 	    ld b, #'Z'
 	    call _bugoutv
-            ld hl, #256
+	    ; Returns with A giving the number of 64K banks present
+	    call probe_ram
+	    ld hl,#0
+	    ld de,#64
+ramcount:
+	    add hl,de
+	    djnz ramcount
+
             ld (_ramsize), hl
-            ld hl, #(256-64)		; 64K for kernel
+
+	    or a
+	    ld de,#96		; 64K for kernel, 32K for video/fonts
+	    sbc hl,de
             ld (_procmem), hl
+
+	    call _vtinit
 
 	    ; FIXME 100Hz timer on
 
@@ -107,17 +125,75 @@ init_hardware:
             call _program_vectors
             pop hl
 
+	    xor a
+	    .dw 0xfeed
+	    ld (_is_joyce),a
             im 1 ; set CPU interrupt mode
 	    ld b, #'I'
 	    call _bugoutv
             ret
 
+	    .area _DISCARD
+;
+;	Discard is in common so we can keep stuff like bank probing here
+;
+;	We have 256K, 512K or maybe up to 2MB with third party add ins
+;
+probe_ram:
+	    ld hl,#0x4000		; address we will play with
+	    ld a,#0x80
+	    ld b,#0xAA
+;
+;	Label each bank with the page code
+;
+mark_banks:
+	    out (0xF1),a		; Mark all the banks
+	    ld (hl),b
+	    add #0x10
+	    jr nz, mark_banks
+
+	    ld a,#0x90
+;
+;	Now walk the labelled banks and check for the right code
+;
+	    ld bc,#0x80F1
+probe_next:
+	    ld a,#0xAA
+	    out (c),b			; switch bank
+	    cp (hl)			; still marked AA ?
+	    jr nz,notfound
+	    cpl
+	    ld (hl),a
+	    cp (hl)
+	    jr nz,notfound		; not valid RAM
+	    ld a,b
+	    add #0x10			; move on 256K
+	    jr z, full_load		; done
+	    ld b,a
+	    xor a
+	    ld (hl),a			; write sanity check
+	    cp (hl)
+	    jr z,probe_next
+notfound:
+	    ld a,b
+	    ; A is the top page set found
+	    rra
+	    rra
+	    and #0x1C			; Now the number of 64K blocks
+	    ld b,a
+banksok:
+	    ld a,#0x81
+	    out (0xF1),a		; back to kernel bank
+	    ret
+full_load:
+	    ld b,#0x20
+	    jr banksok
 
 ;------------------------------------------------------------------------------
 ; COMMON MEMORY PROCEDURES FOLLOW
+;------------------------------------------------------------------------------
 
-            .area _COMMONMEM
-
+	    .area _COMMONMEM
 
 _program_vectors:
             ; we are called, with interrupts disabled, by both newproc() and crt0
@@ -164,12 +240,15 @@ _program_vectors:
 ;
 ;	map_kernel		-	map in the kernel, trashes nothing
 ;	map_process_always	-	map in the current process, ditto
+;	map_buffers		-	map in the kernel + buffers, ditto
 ;	map_process		-	map the pages pointed to by hl, eats
 ;					a, hl
 ;
-kmap:	    .db 0x80, 0x81, 0x82, 0x83
+kmap:	    .db 0x80, 0x81, 0x82
 
+map_buffers:
 map_kernel:
+map_kernel_di:
 	    push af
 	    push hl
 	    ld hl, #kmap
@@ -178,23 +257,34 @@ map_kernel:
 	    pop af
 	    ret
 
+;
+;	Map page A into the swap zone
+;
+map_for_swap:
+	   ld (map_current + 1),a	; update table for 0x4000
+	   out (0xF1),a			; and the mapping
+	   ret
+
 map_process_always:
+map_process_always_di:
 	    push af
 	    push hl
-	    ld hl, #U_DATA__U_PAGE
+	    ld hl, #_udata + U_DATA__U_PAGE
 	    call map_process_1
 	    pop hl
 	    pop af
 	    ret
 
+;
+;	We shouldn't need IRQ protection here - review
+;
 map_process:
+map_process_di:
 	    ld a, h
 	    or l
 	    jr z, map_kernel
+map_process_a:	; really map_process_hl in our case.
 map_process_1:
-	    ld a, i
-	    push af
-	    di			; ensure we don't take an irq mid update
 	    push de
 	    push bc
 	    ld de, #map_current
@@ -210,12 +300,10 @@ map_loop:
 	    djnz map_loop
 	    pop bc
 	    pop de
-	    pop af
-	    ret po
-	    ei
 	    ret
 
-map_save:   push hl
+map_save_kernel:
+	    push hl
 	    push de
 	    push bc
 	    ld hl, #map_current
@@ -223,6 +311,10 @@ map_save:   push hl
 	    ldi
 	    ldi
 	    ldi
+	    push af
+	    ld hl, #kmap
+	    call map_process_1
+	    pop af
 	    pop bc
 	    pop de
 	    pop hl
@@ -236,22 +328,21 @@ map_restore:push hl
             pop hl
             ret
 
-
 _bugout:    pop hl
 	    pop bc
 	    push bc
 	    push hl
 	    ld b, c
 _bugoutv:
-	    ld a, #0x20
+	    ld a, b
 	    .dw 0xfeed
 	    ret
 ; outchar: Wait for UART TX idle, then print the char in A
 ; destroys: AF
 ;
 outchar:    push bc
-	    ld b, a
-	    ld a, #0x20
+	    ld b,a
+	    ld a,#0xFA
 	    .dw 0xfeed
 	    pop bc
 	    ret
@@ -268,7 +359,6 @@ outcharl:
 	    pop af
 	    out (0xE0), a
 	    ret
-
 
 	    .area _CODE
 
@@ -292,7 +382,7 @@ _scroll_down:
 
 	    .area _COMMONMEM
 
-addr_de:    ld a, i
+addr_de:    ld a, (_int_disabled)
 	    push af
 	    ld a, (roller)
 	    rra			; in text lines
@@ -349,7 +439,8 @@ addr_de:    ld a, i
 	    out (0xf1), a
 	    pop bc
 	    pop af
-	    ret po
+	    or a
+	    ret nz
 	    ei
 	    ret
 _plot_char:
@@ -392,6 +483,7 @@ _cursor_off:
 	    ld de, (cursorpos)
 	    jr cursordo
 
+_cursor_disable:
 _do_beep:
 	    ret
 
@@ -448,12 +540,7 @@ roller:	    .db 0
 cursorpos:  .dw 0
 
 ;
-;	We need map_current to be at least 256 bytes into common as we
-;	swap the first 256 bytes.
-;
-;	FIXME: should we teach the tools about a 'commondata' ?
-;
-	    .area _COMMONMEM
+	    .area _COMMONDATA
 ;
 ;	These are in common, that means that on a system that switches
 ; common by task there are multiple copies of this information.
@@ -471,5 +558,6 @@ map_save_area:
 	    .db 0
 	    .db 0
 
-_need_resched:
-	    .db 0
+_int_disabled:
+	    .db 1
+

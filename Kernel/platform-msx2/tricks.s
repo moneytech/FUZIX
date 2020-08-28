@@ -3,12 +3,11 @@
         .module tricks
 
         .globl _ptab_alloc
-        .globl _newproc
+        .globl _makeproc
         .globl _chksigs
         .globl _getproc
-        .globl _trap_monitor
-        .globl trap_illegal
-        .globl _switchout
+        .globl _platform_monitor
+        .globl _platform_switchout
         .globl _switchin
         .globl _doexec
         .globl _dofork
@@ -16,13 +15,16 @@
         .globl unix_syscall_entry
         .globl interrupt_handler
 	.globl map_kernel
+
 	.globl _ramtop
+	.globl _int_disabled
+	.globl _udata
 
         ; imported debug symbols
         .globl outstring, outde, outhl, outbc, outnewline, outchar, outcharhex
 
         .include "kernel.def"
-        .include "../kernel.def"
+        .include "../kernel-z80.def"
 
         .area _COMMONMEM
 
@@ -38,9 +40,8 @@ _ramtop:
 ; from switchout().
 ; 
 ; This function can have no arguments or auto variables.
-_switchout:
+_platform_switchout:
         di
-        call _chksigs
         ; save machine state
 
         ld hl, #0 ; return code set here is ignored, but _switchin can 
@@ -49,7 +50,7 @@ _switchout:
         push hl ; return code
         push ix
         push iy
-        ld (U_DATA__U_SP), sp ; this is where the SP is restored in _switchin
+        ld (_udata + U_DATA__U_SP), sp ; this is where the SP is restored in _switchin
 
         ; find another process to run (may select this one again)
         call _getproc
@@ -58,7 +59,7 @@ _switchout:
         call _switchin
 
         ; we should never get here
-        call _trap_monitor
+        call _platform_monitor
 
 badswitchmsg: .ascii "_switchin: FAIL"
             .db 13, 10, 0
@@ -80,7 +81,7 @@ _switchin:
 
 	; ------- No stack -------
         ; check u_data->u_ptab matches what we wanted
-        ld hl, (U_DATA__U_PTAB) ; u_data->u_ptab
+        ld hl, (_udata + U_DATA__U_PTAB) ; u_data->u_ptab
         or a                    ; clear carry flag
         sbc hl, de              ; subtract, result will be zero if DE==IX
         jr nz, switchinfail
@@ -96,7 +97,7 @@ _switchin:
 
         ; restore machine state -- note we may be returning from either
         ; _switchout or _dofork
-        ld sp, (U_DATA__U_SP)
+        ld sp, (_udata + U_DATA__U_SP)
 
 	; ---- New task stack ----
 
@@ -108,7 +109,8 @@ _switchin:
         pop hl ; return code
 
         ; enable interrupts, if the ISR isn't already running
-        ld a, (U_DATA__U_ININTERRUPT)
+        ld a, (_udata + U_DATA__U_ININTERRUPT)
+	ld (_int_disabled),a
         or a
         ret nz ; in ISR, leave interrupts off
         ei
@@ -121,7 +123,7 @@ switchinfail:
         ld hl, #badswitchmsg
         call outstring
 	; something went wrong and we didn't switch in what we asked for
-        jp _trap_monitor
+        jp _platform_monitor
 
 fork_proc_ptr: .dw 0 ; (C type is struct p_tab *) -- address of child process p_tab entry
 
@@ -159,7 +161,7 @@ _dofork:
         ; _switchin which will immediately return (appearing to be _dofork()
 	; returning) and with HL (ie return code) containing the child PID.
         ; Hurray.
-        ld (U_DATA__U_SP), sp
+        ld (_udata + U_DATA__U_SP), sp
 
         ; now we're in a safe state for _switchin to return in the parent
 	; process.
@@ -177,10 +179,13 @@ _dofork:
         pop bc
 
         ; The child makes its own new process table entry, etc.
-        ld  hl, (fork_proc_ptr)
+	ld hl, #_udata
+	push hl
+        ld hl, (fork_proc_ptr)
         push hl
-        call _newproc
+        call _makeproc
         pop bc 
+	pop bc
 
 	; any calls to map process will now map the childs memory
 
@@ -199,7 +204,7 @@ _dofork:
 ;	and map_restore
 ;
 fork_copy:
-	ld hl, (U_DATA__U_TOP)
+	ld hl, (_udata + U_DATA__U_TOP)
 	ld de, #0x0fff
 	add hl, de		; + 0x1000 (-1 for the rounding to follow)
 	ld a, h
@@ -214,7 +219,7 @@ fork_copy:
 	ld de, #P_TAB__P_PAGE_OFFSET
 	add hl, de
 	; hl now points into the child pages
-	ld de, #U_DATA__U_PAGE
+	ld de, #_udata + U_DATA__U_PAGE
 	; and de is the parent
 fork_next:
 	ld a,(hl)

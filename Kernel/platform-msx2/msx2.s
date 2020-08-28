@@ -14,23 +14,29 @@
 	    .globl map_process
 	    .globl _map_kernel
 	    .globl map_process_always
-	    .globl map_save
+	    .globl map_kernel_di
+	    .globl map_process_di
+	    .globl map_process_always_di
+	    .globl map_save_kernel
 	    .globl map_restore
 	    .globl enaslt
 	    .globl _mapslot_bank1
 	    .globl _mapslot_bank2
 	    .globl _need_resched
+            .globl _bufpool
+	    .globl _int_disabled
+            .globl _udata
 
 	    ; video driver
 	    .globl _vtinit
 
             ; exported debugging tools
-            .globl _trap_monitor
+            .globl _platform_monitor
             .globl outchar
 
             .globl _tty_inproc
             .globl unix_syscall_entry
-            .globl _trap_reboot
+            .globl _platform_reboot
 	    .globl nmi_handler
 	    .globl null_handler
 
@@ -54,26 +60,32 @@
 	    .globl _vdpinit
 
             .include "kernel.def"
-            .include "../kernel.def"
+            .include "../kernel-z80.def"
 
+	    .area _BUFFERS
+
+_bufpool:
+	    .ds BUFSIZE * NBUFS
 ; -----------------------------------------------------------------------------
 ; COMMON MEMORY BANK (0xF000 upwards)
 ; -----------------------------------------------------------------------------
             .area _COMMONMEM
 
 ; Ideally return to any debugger/monitor
-_trap_monitor:
+_platform_monitor:
 	    di
 	    halt
 
 
-_trap_reboot:
+_platform_reboot:
 ;FIXME: TODO
 	    di
 	    halt
 
 _need_resched:
 	    .db 0
+_int_disabled:
+	    .db 1
 
 ; -----------------------------------------------------------------------------
 ; KERNEL MEMORY BANK (below 0xF000, only accessible when the kernel is mapped)
@@ -148,7 +160,7 @@ _program_vectors:
             ld hl, #unix_syscall_entry
             ld (0x0031), hl
 
-            ld (0x0000), a   
+            ld (0x0000), a
             ld hl, #null_handler   ;   to Our Trap Handler
             ld (0x0001), hl
 
@@ -161,8 +173,9 @@ _program_vectors:
 ;	All registers preserved
 ;
 map_process_always:
+map_process_always_di:
 	    push hl
-	    ld hl, #U_DATA__U_PAGE
+	    ld hl, #_udata + U_DATA__U_PAGE
 	    call map_process_2
 	    pop hl
 	    ret
@@ -170,6 +183,7 @@ map_process_always:
 ;	HL is the page table to use, A is eaten, HL is eaten
 ;
 map_process:
+map_process_di:
 	    ld a, h
 	    or l
 	    jr nz, map_process_2
@@ -178,6 +192,7 @@ map_process:
 ;	so our cached copy is correct.
 ;
 _map_kernel:
+map_kernel_di:
 map_kernel:
 	    push hl
 	    ld hl, #map_kernel_data
@@ -187,22 +202,25 @@ map_kernel:
 
 map_process_2:
 	    push de
+            push bc
 	    push af
 	    ld de, #map_table	; Write only so cache in RAM
-	    ld a, (hl)
-	    ld (de), a
-	    out (0xFC), a	; Low 16K
-	    inc hl
-	    inc de
-	    ld a, (hl)	
-	    out (0xFD), a	; Next 16K
-	    ld (de), a
-	    inc hl
-	    inc de
-	    ld a, (hl)		; Next 16K. Leave the common for the task
-	    out (0xFE), a	; switcher
-	    ld (de), a
+            ld (de), a
+            ld bc, #4
+            ldir
+            dec hl
+            dec hl
+            dec hl
+            dec hl
+            ld c, #0xFC
+            ld b, #4
+            outi
+            inc c
+            outi
+            inc c
+            outi
 	    pop af
+            pop bc
 	    pop de
             ret
 ;
@@ -218,11 +236,14 @@ map_restore:
 ;
 ;	Save the current mapping.
 ;
-map_save:   push hl
+map_save_kernel:
+            push hl
 	    ld hl, (map_table)
 	    ld (map_savearea), hl
 	    ld hl, (map_table + 2)
 	    ld (map_savearea + 2), hl
+	    ld hl, #map_kernel_data
+	    call map_process_2
 	    pop hl
 	    ret
 
@@ -339,7 +360,7 @@ setexp1:
 
 
 map_table:
-	    .db 0,0,0,0	
+	    .db 0,0,0,0
 map_savearea:
 	    .db 0,0,0,0
 map_kernel_data:
@@ -361,4 +382,3 @@ outchar:
 	    out (0x2F), a
 	    pop af
 	    ret
-

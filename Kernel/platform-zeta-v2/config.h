@@ -6,14 +6,12 @@
 #undef CONFIG_PROFIL
 /* Multiple processes in memory at once */
 #define CONFIG_MULTI
-/* Single tasking */
-#undef CONFIG_SINGLETASK
 /* CP/M emulation */
 #undef CONFIG_CPM_EMU
 /* Flexible 4x16K banking */
 #define CONFIG_BANK16
 /* Permit large I/O requests to bypass cache and go direct to userspace */
-#define CONFIG_LARGE_IO_DIRECT
+#define CONFIG_LARGE_IO_DIRECT(x)	1
 /* 32 x 16K pages, 3 pages for kernel, whatever the RAM disk uses */
 #define MAX_MAPS	(32 - 3 - DEV_RD_RAM_PAGES)
 
@@ -47,6 +45,7 @@
 
 /* On-board DS1302, we can read the time of day from it */
 #define CONFIG_RTC
+#define CONFIG_RTC_FULL
 #define CONFIG_RTC_INTERVAL 30 /* deciseconds between reading RTC seconds counter */
 
 /* Floppy support */
@@ -54,6 +53,7 @@
 
 /* PPIDE support */
 #define CONFIG_PPIDE 		/* #define CONFIG_PPIDE to enable IDE on 8255A */
+#define CONFIG_IDE		/* required for CONFIG_PPIDE */
 
 /* Optional ParPortProp board connected to PPI */
 //#define CONFIG_PPP		/* #define CONFIG_PPP to enable as tty3 */
@@ -87,3 +87,5 @@
 #endif
 
 #define TTYDEV   BOOT_TTY /* Device used by kernel for messages, panics */
+
+#define platform_copyright()		/* For now */

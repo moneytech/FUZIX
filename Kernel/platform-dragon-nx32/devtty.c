@@ -10,6 +10,10 @@
 #include <devdw.h>
 #include <ttydw.h>
 #include <graphics.h>
+#include <crt9128.h>
+
+void set_vc_mode(uint8_t);
+void set_vid_mode(void);
 
 #undef  DEBUG			/* UNdefine to delete debug code sequences */
 
@@ -18,26 +22,54 @@ uint8_t *uart_status = (uint8_t *)0xFF05;	/* ACIA status */
 uint8_t *uart_command = (uint8_t *)0xFF06;	/* ACIA command */
 uint8_t *uart_control = (uint8_t *)0xFF07;	/* ACIA control */
 
-#define ACIA_TTY 2
+#define ACIA_TTY 5
 #define is_dw(minor) (minor >= DW_MIN_OFF)
 
-unsigned char tbuf1[TTYSIZ];
-unsigned char tbuf2[TTYSIZ];
-unsigned char tbuf3[TTYSIZ];   /* drivewire VSER 0 */
-unsigned char tbuf4[TTYSIZ];   /* drivewire VWIN 0 */
+static unsigned char tbuf1[TTYSIZ];
+static unsigned char tbuf2[TTYSIZ];
+static unsigned char tbuf3[TTYSIZ];
+static unsigned char tbuf4[TTYSIZ];
+static unsigned char tbuf5[TTYSIZ];
+static unsigned char tbuf6[TTYSIZ];   /* drivewire VSER 0 */
+static unsigned char tbuf7[TTYSIZ];   /* drivewire VWIN 0 */
 
 struct s_queue ttyinq[NUM_DEV_TTY + 1] = {	/* ttyinq[0] is never used */
 	{NULL, NULL, NULL, 0, 0, 0},
 	{tbuf1, tbuf1, tbuf1, TTYSIZ, 0, TTYSIZ / 2},
 	{tbuf2, tbuf2, tbuf2, TTYSIZ, 0, TTYSIZ / 2},
-	/* Drivewire Virtual Serial Ports */
 	{tbuf3, tbuf3, tbuf3, TTYSIZ, 0, TTYSIZ / 2},
 	{tbuf4, tbuf4, tbuf4, TTYSIZ, 0, TTYSIZ / 2},
+	{tbuf5, tbuf5, tbuf5, TTYSIZ, 0, TTYSIZ / 2},
+	/* Drivewire Virtual Serial Ports */
+	{tbuf6, tbuf6, tbuf6, TTYSIZ, 0, TTYSIZ / 2},
+	{tbuf7, tbuf7, tbuf7, TTYSIZ, 0, TTYSIZ / 2},
+};
+
+tcflag_t termios_mask[NUM_DEV_TTY + 1] = {
+	0,
+	/* Console */
+	_CSYS,
+	/* 9128 */
+	_CSYS,
+	/* VC */
+	_CSYS,
+	_CSYS,
+	/* ACIA */
+	/* Review flow control and CSTOPB TODO */
+	_CSYS|CBAUD|CSIZE|PARENB|PARODD|PARMRK,
+	/* Drivewire */
+	_CSYS,
+	_CSYS
 };
 
 uint8_t vtattr_cap = VTA_INVERSE|VTA_UNDERLINE|VTA_ITALIC|VTA_BOLD|
 		     VTA_OVERSTRIKE|VTA_NOCURSOR;
 
+const signed char vt_tright[4]  = { 31, 77, 31, 31 };
+const signed char vt_tbottom[4] = { 23, 22, 15, 15 };
+extern uint8_t curtty;
+static uint8_t inputtty;
+static struct vt_switch ttysave[4];
 static uint8_t vmode;
 static uint8_t kbd_timer;
 struct vt_repeat keyrepeat = { 40, 4 };
@@ -45,18 +77,20 @@ struct vt_repeat keyrepeat = { 40, 4 };
 /* tty1 is the screen tty2 is the serial port */
 
 /* Output for the system console (kprintf etc) */
-void kputchar(char c)
+void kputchar(uint_fast8_t c)
 {
 	if (c == '\n')
 		tty_putc(TTYDEV & 0xff, '\r');
 	tty_putc(TTYDEV & 0xff, c);
 }
 
-ttyready_t tty_writeready(uint8_t minor)
+ttyready_t tty_writeready(uint_fast8_t minor)
 {
 	uint8_t c = 0xff;
 	if (minor == 1)
 		return TTY_READY_NOW;
+	else if (minor == 2)
+		c = crt9128_done();
 	else if (minor == ACIA_TTY)
 		c = *uart_status & 16; /* TX DATA empty */
 	return c ? TTY_READY_NOW : TTY_READY_SOON;
@@ -64,8 +98,10 @@ ttyready_t tty_writeready(uint8_t minor)
 
 /* For DragonPlus we should perhaps support both monitors 8) */
 
-void tty_putc(uint8_t minor, unsigned char c)
+void tty_putc(uint_fast8_t minor, uint_fast8_t c)
 {
+	irqflags_t irq;
+
 	if (is_dw(minor)) {
 		dw_putc(minor, c);
 		return;
@@ -73,14 +109,23 @@ void tty_putc(uint8_t minor, unsigned char c)
 		*uart_data = c;	/* Data */
 		return;
 	}
+	irq = di();
+	if (curtty != minor - 1) {
+		vt_save(&ttysave[curtty]);
+		curtty = minor - 1;
+		vt_load(&ttysave[curtty]);
+	}
 	if (minor == 1) {
 		/* We don't do text except in 256x192 resolution modes */
 		if (vmode < 2)
 			vtoutput(&c, 1);
+	} else if (minor >= 2 && minor <= 4) {
+		vtoutput(&c, 1);
 	}
+	irqrestore(irq);
 }
 
-void tty_sleeping(uint8_t minor)
+void tty_sleeping(uint_fast8_t minor)
 {
     used(minor);
 }
@@ -109,12 +154,19 @@ static uint8_t bitbits[] = {
 	0x00
 };
 
-void tty_setup(uint8_t minor)
+void tty_setup(uint_fast8_t minor, uint_fast8_t flag)
 {
 	uint8_t r;
 	if (is_dw(minor)) {
 		dw_vopen(minor);
 		return;
+	}
+	if (minor == 2) {
+		crt9128_init();
+		return;
+	}
+	if (minor == 3 || minor == 4) {
+		vc_clear(minor - 3);
 	}
 	if (minor != ACIA_TTY)
 		return;
@@ -138,11 +190,15 @@ void tty_setup(uint8_t minor)
 	}
 }
 
-int tty_carrier(uint8_t minor)
+int tty_carrier(uint_fast8_t minor)
 {
 	if (is_dw(minor)) return dw_carrier( minor );
 	/* The serial DCD is status bit 5 but not wired */
 	return 1;
+}
+
+void tty_data_consumed(uint_fast8_t minor)
+{
 }
 
 void tty_interrupt(void)
@@ -213,7 +269,7 @@ static void keyproc(void)
 		}
 		keymap[i] = keyin[i];
 	}
-	if (system_id && keybit != 6) { 	/* COCO series */
+	if (newkey == 1 && system_id && keybit != 6) { 	/* COCO series */
 	  keybit += 2;
 	  if (keybit > 5)
 	    keybit -= 6;
@@ -251,10 +307,19 @@ static void keydecode(void)
 	else
 		c = keyboard[keybyte][keybit];
 	if (keymap[1] & 64) {	/* control */
+		if (c >= '1' && c <= '4') {
+			inputtty = c - '1';
+			/* switch VDU base and VDG/SAM video mode */
+			if (inputtty == 0)
+				set_vid_mode();
+			else if (inputtty == 2 || inputtty == 3)
+				set_vc_mode(inputtty - 2);
+			return;
+		}
 		if (c > 31 && c < 127)
 			c &= 31;
 	}
-	tty_inproc(1, c);
+	tty_inproc(inputtty + 1, c);
 }
 
 void platform_interrupt(void)
@@ -275,6 +340,7 @@ void platform_interrupt(void)
 		}
                 fd_timer_tick();
 		timer_interrupt();
+		wakeup(&platform_interrupt);
 		dw_vpoll();
 	}
 }
@@ -349,7 +415,9 @@ static uint8_t piabits[] = { 0xF0, 0xF8, 0xE0, 0xE8};
 ///* V0 V1 V2 */
 //static uint8_t sambits[] = { 0x6, 0x6, 0x6, 0x6 };
 
-
+static struct fontinfo fontinfo = {
+	0, 255, 128, 255, FONT_INFO_8X8
+};
 
 #define pia1b	((volatile uint8_t *)0xFF22)
 #define sam_v	((volatile uint8_t *)0xFFC0)
@@ -393,12 +461,35 @@ static int gfx_draw_op(uarg_t arg, char *ptr, uint8_t *buf)
   return 0;
 }
 
-int gfx_ioctl(uint8_t minor, uarg_t arg, char *ptr)
+int gfx_ioctl(uint_fast8_t minor, uarg_t arg, char *ptr)
 {
+	extern unsigned char fontdata_8x8[];
+
 	if (is_dw(minor))	/* remove once DW get its own ioctl() */
 		return tty_ioctl(minor, arg, ptr);
+	if (minor == 1) {
+		uint16_t size = 128 * 8;
+		uint16_t base = 128 * 8;
+		switch (arg) {
+		case VTFONTINFO:
+			return uput(&fontinfo, ptr, sizeof(fontinfo));
+		case VTSETFONT:
+			size = base = 0;
+		case VTSETUDG:
+			return uget(fontdata_8x8 + base, ptr, size);
+		case VTGETFONT:
+			size = base = 0;
+		case VTGETUDG:
+			return uput(fontdata_8x8 + base, ptr, size);
+		}
+	}
+	if (arg == VTSIZE)
+		return (vt_tbottom[minor - 1] + 1) << 8 | (vt_tright[minor - 1] + 1);
 	if (arg >> 8 != 0x03)
 		return vt_ioctl(minor, arg, ptr);
+
+	/* FIXME: limit to console ? */
+
 	switch(arg) {
 	case GFXIOC_GETINFO:
 		return uput(&display[vmode], ptr, sizeof(struct display));
@@ -426,10 +517,7 @@ int gfx_ioctl(uint8_t minor, uarg_t arg, char *ptr)
 		return 0;
 	}
 	case GFXIOC_WAITVB:
-		/* Our system clock is our vblank, use the standard timeout
-		   to pause for one clock */
-		udata.u_ptab->p_timeout = 2;
-		psleep(NULL);
+		psleep(&platform_interrupt);
 		return 0;
 	case GFXIOC_DRAW:
 	case GFXIOC_READ:
@@ -440,7 +528,7 @@ int gfx_ioctl(uint8_t minor, uarg_t arg, char *ptr)
 
 		tmp = (uint8_t *)tmpbuf();
 		err = gfx_draw_op(arg, ptr, tmp);
-		brelse((bufptr) tmp);
+		tmpfree(tmp);
 		if (err) {
 			udata.u_error = err;
 			err = -1;
@@ -452,7 +540,7 @@ int gfx_ioctl(uint8_t minor, uarg_t arg, char *ptr)
 }
 
 /* A wrapper for tty_close that closes the DW port properly */
-int my_tty_close(uint8_t minor)
+int my_tty_close(uint_fast8_t minor)
 {
 	if (is_dw(minor) && ttydata[minor].users == 1)
 		dw_vclose(minor);

@@ -22,9 +22,10 @@ UZI (Unix Z80 Implementation) Utilities:  mkfs.c
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <sys/super.h>
+#include <time.h>
 
-
-typedef uint16_t blkno_t;
 
 struct dinode {
     uint16_t i_mode;
@@ -37,25 +38,6 @@ struct dinode {
     uint32_t   i_ctime;		/* 24 bytes */
     blkno_t  i_addr[20];
 };               /* Exactly 64 bytes long! */
-
-#define FILESYS_TABSIZE 50
-
-struct filesys {
-    int16_t       s_mounted;
-#define SMOUNTED  12742   /* Magic number to specify mounted filesystem */
-    uint16_t      s_isize;
-    uint16_t      s_fsize;
-    uint16_t      s_nfree;
-    blkno_t       s_free[FILESYS_TABSIZE];
-    int16_t       s_ninode;
-    uint16_t      s_inode[FILESYS_TABSIZE];
-    uint8_t       s_fmod;
-    uint8_t       s_timeh;	/* bits 32-40: FIXME - wire up */
-    uint32_t      s_time;
-    blkno_t       s_tfree;
-    uint16_t      s_tinode;
-    void *        s_mntpt;     /* Mount point */
-};
 
 #define FILENAME_LEN	30
 #define DIR_LEN		32
@@ -73,7 +55,7 @@ int dev;
 
 direct dirbuf[64] = { {ROOTINODE, "."}, {ROOTINODE, ".."} };
 struct dinode inode[8];
-struct filesys fs_tab;
+struct fuzix_filesys_kernel fs_tab;
 
 void dwrite(uint16_t blk, char *addr)
 {
@@ -112,18 +94,22 @@ void mkfs(uint16_t fsize, uint16_t isize)
 {
     uint16_t j;
     char *zeros;
+    time_t t = time(NULL);
 
     /* Zero out the blocks */
-    printf("Zeroizing i-blocks...\n");
+    printf("Clearing blocks ");
     zeros = zerobuf();		/* Get a zero filled buffer */
 
-    if( !fast ){
-	    for (j = 0; j < fsize; ++j)
+    if (!fast) {
+	    for (j = 0; j < fsize; ++j) {
+	            putchar('.');
 		    dwrite(j, zeros);
-    }
-    else{
-	    for (j = 0; j < isize; ++j)
+            }
+    } else {
+	    for (j = 0; j < isize; ++j) {
+	            putchar('.');
 		    dwrite(j, zeros);
+            }
     }
 
     /* Initialize the super-block */
@@ -135,10 +121,12 @@ void mkfs(uint16_t fsize, uint16_t isize)
     fs_tab.s_tfree = 0;
     fs_tab.s_ninode = 0;
     fs_tab.s_tinode = (8 * (isize - 2)) - 2;
+    fs_tab.s_time = t;
+    fs_tab.s_timeh = (t >> 31) >> 1;	/* Mutter .. C standards .. mutter */
 
     /* Free each block, building the free list */
 
-    printf("Building free list...\n");
+    printf("\nBuilding free list...\n");
     for (j = fsize - 1; j > isize; --j) {
 	if (fs_tab.s_nfree == 50) {
 	    dwrite(j, (char *) &fs_tab.s_nfree);
@@ -174,7 +162,7 @@ void mkfs(uint16_t fsize, uint16_t isize)
     printf("Done.\n");
 }
 
-void printopts( )
+void printopts(void)
 {
 	fprintf( stderr, "usage: mkfs [options] device isize fsize\n");
 	exit(-1);
@@ -224,7 +212,7 @@ int main(int argc, char *argv[])
     if (!yes())
 	exit(-1);
 
-    dev = open(argv[optind], O_RDWR);
+    dev = open(argv[optind], O_RDWR|O_SYNC);
     if (dev < 0) {
         fprintf(stderr, "mkfs: can't open device %s\n", argv[optind]);
         exit(-1);

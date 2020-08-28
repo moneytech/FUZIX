@@ -3,10 +3,17 @@
 #include <kdata.h>
 #include <printf.h>
 #include <devtty.h>
+#include <msx.h>
 
 /* These are set by the msx startup asm code */
-uint16_t vdpport = 0x99 + 256 * 40;
+extern uint16_t vdpport;
 uint16_t infobits;
+uint16_t swap_dev = 0xFFFF;
+uint16_t ramtop = 0xC000;
+uint8_t machine_type;
+uint8_t vdptype;
+uint8_t *bouncebuffer;
+uint16_t devtab[4][4][3];
 
 void platform_idle(void)
 {
@@ -14,6 +21,8 @@ void platform_idle(void)
     halt
     __endasm;
 }
+
+/* Some of this is discard stuff */
 
 uint8_t platform_param(char *p)
 {
@@ -25,26 +34,37 @@ void do_beep(void)
 {
 }
 
-/*
- *	We have one bank per 32K and we number them upwards from 1 as the
- *	core kernel code uses 0 for swapped out.
- */
-
-void pagemap_init(void)
-{
-    int i = procmem / 32;
-    while (i > 0)
-        pagemap_add(i--);
-}
-
-void map_init(void)
-{
-    if (procmem == 0)
-	panic("MegaRAM not found.\n");
-}
-
-
 void platform_interrupt(void)
 {
-	timer_interrupt();
+        uint8_t r = in((uint8_t)vdpport);
+        if (r & 0x80) {
+  	  kbd_interrupt();
+  	  timer_interrupt();
+        }
+}
+
+void platform_discard(void)
+{
+    /* Until we tackle the buffers. When we do we will reserve 512 bytes
+       at the end (probably FDFE-FFFE (FFFF being magic)) */
+    bouncebuffer = (uint8_t *)0xFD00;	/* Hack for now */
+}
+
+uint8_t device_find(const uint16_t *romtab)
+{
+  uint8_t slot, sub;
+  while(*romtab) {
+    for (slot = 0; slot < 4; slot++) {
+      for (sub = 0; sub < 4; sub++) {
+        if (*romtab == devtab[slot][sub][1]) {
+          if (subslots & (1 << slot))
+            return 0x80 | slot | (sub << 2);
+          else
+            return slot;
+        }
+      }
+    }
+    romtab++;
+  }
+  return 0xFF;
 }

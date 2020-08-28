@@ -11,13 +11,14 @@ CRT0 = ../../../Library/libs/crt0_68000.o
 CRT0NS = ../../../Library/libs/crt0nostdio_68000.o
 # For now while we get going. Really we want to use some kind of elf2zmagic
 # with relocs.
-ELF2FUZIX = elf2flt
+ELF2FUZIX = elf2flt -s 16384
 .SUFFIXES: .c .o
 
-SRCS  = ac.c col.c dc.c diff.c makekey.c ptx.c sum.c wall.c
+SRCS  = ac.c col.c dc.c diff.c ed.c makekey.c ptx.c sum.c wall.c
 SRCS += accton.c  comm.c   dd.c      diffh.c  mesg.c     rev.c    test.c
 SRCS += at.c      cron.c   deroff.c  join.c   newgrp.c   split.c  time.c
 SRCS += atrun.c   crypt.c  diff3.c   look.c   pr.c       su.c     tsort.c
+SRCS += pg.c	  tty.c
 
 OBJS = $(SRCS:.c=.o)
 

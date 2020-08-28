@@ -1,6 +1,9 @@
 ; 2015-02-19 Sergey Kiselev
 ; 2014-12-31 William R Sowerbutts
 ; N8VEM SBC / Zeta SBC DS1302 real time clock interface code
+;
+;	FIXME: belongs in dev/
+;
 
         .module ds1302-n8vem
 
@@ -12,7 +15,7 @@
         .globl _ds1302_get_pin_data
 
         .include "kernel.def"
-        .include "../kernel.def"
+        .include "../kernel-z80.def"
 
 ; -----------------------------------------------------------------------------
 ; DS1302 interface
@@ -38,9 +41,7 @@ _ds1302_get_pin_data:
         ret
 
 _ds1302_set_pin_data_driven:
-        ld hl, #2               ; get address of function argument
-        add hl, sp
-        ld b, (hl)              ; load argument from stack
+        ld b, l                 ; load argument from stack
         ld a, (rtc_shadow)
         and #~PIN_DATA_HIZ      ; 0 - output pin
         bit 0, b                ; test bit
@@ -63,9 +64,7 @@ _ds1302_set_pin_clk:
 setpin:
         ld a, (rtc_shadow)      ; load current register contents
         and b                   ; unset the pin
-        ld hl, #2               ; get address of function argument
-        add hl, sp
-        ld b, (hl)              ; load argument from stack
+        ld b, l                 ; load argument from stack
         bit 0, b                ; test bit
         jr z, writereg          ; arg is false
         or c                    ; arg is true

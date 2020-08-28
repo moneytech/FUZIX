@@ -17,7 +17,6 @@ WINTR	equ	256		; window xfer treshold
 	.globl 	__ugetc
 	.globl 	__ugetw
 	.globl 	__uget
-	.globl 	__ugets
 	.globl 	__uputc
 	.globl 	__uputw
 	.globl 	__uput
@@ -73,30 +72,6 @@ ugetl:
 	bne 	ugetl
 	ldx 	#0
 	puls 	u,y,cc,pc
-
-__ugets:
-	pshs 	u,y,cc
-	ldu 	7,s	; user address
-	ldy 	9,s	; count
-	orcc 	#0x10
-ugetsl:
-	jsr 	map_process_always
-	lda 	,x+
-	beq 	ugetse
-	jsr 	map_kernel
-	sta 	,u+
-	leay 	-1,y
-	bne 	ugetsl
-	ldx 	#0xffff	; unterminated - error
-	lda 	#0
-	sta 	-1,u	; force termination
-	puls 	u,y,cc,pc
-ugetse:
-	jsr 	map_kernel
-	sta 	,u
-	ldx 	#0
-	puls 	u,y,cc,pc
-
 
 __uputc:
 	pshs 	cc
@@ -207,10 +182,6 @@ a@	std	,u
 ;;; remapping the mmu, copies those bytes, *then* re-computes the
 ;;; mmu banking and repeats until all bytes are transfered.
 uxfer:
-	;; save kernel mmu mapping
-	ldd	$ffa8
-	ldx	$ffaa
-	pshs	d,x
 	;; make a data stack
 	leau	-8,s		; allow 4 levels in S
 	;; calc max src
@@ -234,7 +205,7 @@ b@	ldd	krn		; calc max byte copiable from source
 	rola			;
 	lsla			; multiply by two
 	anda	#7		; clean off extra bits
-	ldx	#$ffa8		; kernel's mmu ptr
+	ldx	#kmap		; kernel's mmu ptr
 	ldb	a,x		; get mmu entry
 	stb	,y+		; store in mmu
 	inca			; increment index
@@ -271,10 +242,10 @@ a@	lda	,u+		; get a byte
 	;; end inner loop
 	puls	u		; restore data stack
 	;; clean up kernel mmu's for next mapping or returning
-	puls	d,x
-	pshs	d,x
+	ldd	#0x0001
 	std	0xffa8
-	stx	0xffaa
+	ldd	#0x0203
+	std	0xffaa
 	;; increment out loop variables
 	ldd	krn		; add this iteration's byte count
 	addd	icount		; from source address
@@ -287,7 +258,7 @@ a@	lda	,u+		; get a byte
 	std	count
 	lbne	b@		; if bytes left to copy then repeat
 	;; return
-	leas	4,s		; drop saved kernel map
 	ldx 	#0		; return #0 - success
 	puls 	u,y,cc,pc	; return
-
+	;; kernel page mapping
+kmap	.db	0,1,2,3,4,5,0xa,7

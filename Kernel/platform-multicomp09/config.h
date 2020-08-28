@@ -6,11 +6,11 @@
 #undef CONFIG_PROFIL
 /* Multiple processes in memory at once */
 #define CONFIG_MULTI
-/* Single tasking - for now while we get it booting */
-#undef CONFIG_SINGLETASK
 /* Use C helpers for usermem */
 #undef CONFIG_USERMEM_C
 
+/* Do larhge I/O direct to the user memory */
+#define CONFIG_LARGE_IO_DIRECT(x)	1
 /* Reclaim discard space for buffers */
 #define CONFIG_DYNAMIC_BUFPOOL
 
@@ -85,3 +85,5 @@
 
 #define CONFIG_SD         /* enable if SD  interface present */
 #define SD_DRIVE_COUNT 1  /* 1 drive */
+
+#define platform_copyright()	/* For now */

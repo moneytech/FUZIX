@@ -54,7 +54,7 @@ int execute(TREPTR argt, int execflg, int *pf1, int *pf2)
 				a1 = com[1];
 				gchain = schain;
 
-				if ((internal = syslook(com[0], commands)) || argn == 0)
+				if (argn == 0 || (internal = syslook(com[0], commands)))
 					setlist(((COMPTR) t)->comset, 0);
 
 				if (argn && (flags & noexec) == 0) {	/* print command if execpr */
@@ -438,7 +438,7 @@ int execute(TREPTR argt, int execflg, int *pf1, int *pf2)
 
 void execexp(char *s, UFD f)
 {
-	FILEBLK fb;
+	static6502 FILEBLK fb;
 	push(&fb);
 	if (s) {
 		estabf(s);

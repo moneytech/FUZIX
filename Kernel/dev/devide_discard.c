@@ -17,6 +17,8 @@
 #include <devide.h>
 #include <blkdev.h>
 
+#ifdef CONFIG_IDE
+
 /****************************************************************************/
 /* Code in this file is used only once, at startup, so we want it to live   */
 /* in the DISCARD segment. sdcc only allows us to specify one segment for   */
@@ -24,6 +26,9 @@
 /****************************************************************************/
 
 #ifdef IDE_REG_CONTROL
+
+#define IDE_HAS_RESET
+
 static void devide_delay(void)
 {
     timer_t timeout;
@@ -49,16 +54,13 @@ void devide_reset(void)
 }
 #endif
 
-void devide_init_drive(uint8_t drive)
+void devide_init_drive(uint_fast8_t drive)
 {
     blkdev_t *blk;
-    uint8_t *buffer, select;
+    uint8_t *buffer;
+    uint_fast8_t select;
 
-    switch(drive & 1){
-	case 0: select = 0xE0; break;
-	case 1: select = 0xF0; break;
-        default: return;
-    }
+    select = (drive & 1) ? 0xF0 : 0xE0;
 
     ide_select(drive);
 
@@ -66,16 +68,18 @@ void devide_init_drive(uint8_t drive)
     kprintf("IDE drive %d: ", drive);
 
 #ifdef IDE_8BIT_ONLY
+    if (IDE_IS_8BIT(drive)) {
     /* set 8-bit mode -- mostly only supported by CF cards */
-    if (!devide_wait(IDE_STATUS_READY))
-        goto out;
+        if (!devide_wait(IDE_STATUS_READY))
+            goto out;
 
-    devide_writeb(ide_reg_devhead, select);
-    if (!devide_wait(IDE_STATUS_READY))
-        goto out;
+        devide_writeb(ide_reg_devhead, select);
+        if (!devide_wait(IDE_STATUS_READY))
+            goto out;
 
-    devide_writeb(ide_reg_features, 0x01); /* Enable 8-bit PIO transfer mode (CFA feature set only) */
-    devide_writeb(ide_reg_command, IDE_CMD_SET_FEATURES);
+        devide_writeb(ide_reg_features, 0x01); /* Enable 8-bit PIO transfer mode (CFA feature set only) */
+        devide_writeb(ide_reg_command, IDE_CMD_SET_FEATURES);
+    }
 #endif
 
     /* confirm drive has LBA support */
@@ -97,7 +101,11 @@ void devide_init_drive(uint8_t drive)
     blk_op.nblock = 1;
     devide_read_data();
 
+#ifdef CONFIG_IDE_BSWAP
+    if(!(buffer[98] & 0x02)) {
+#else
     if(!(buffer[99] & 0x02)) {
+#endif    
         kputs("LBA unsupported.\n");
         goto failout;
     }
@@ -108,7 +116,7 @@ void devide_init_drive(uint8_t drive)
 
     blk->transfer = devide_transfer_sector;
     blk->flush = devide_flush_cache;
-    blk->driver_data = drive & DRIVE_NR_MASK;
+    blk->driver_data = drive & IDE_DRIVE_NR_MASK;
 
     if( !(((uint16_t*)buffer)[82] == 0x0000 && ((uint16_t*)buffer)[83] == 0x0000) ||
          (((uint16_t*)buffer)[82] == 0xFFFF && ((uint16_t*)buffer)[83] == 0xFFFF) ){
@@ -123,7 +131,7 @@ void devide_init_drive(uint8_t drive)
     blk->drive_lba_count = le32_to_cpu(*((uint32_t*)&buffer[120]));
 
     /* done with our temporary memory */
-    brelse((bufptr)buffer);
+    tmpfree(buffer);
 
     /* Deselect the IDE, as we will re-select it in the partition scan and
        it may not recursively stack de-selections */
@@ -134,7 +142,7 @@ void devide_init_drive(uint8_t drive)
 
     return;
 failout:
-    brelse((bufptr)buffer);
+    tmpfree(buffer);
 out:
     ide_deselect();
     return;
@@ -142,12 +150,14 @@ out:
 
 void devide_init(void)
 {
-    uint8_t d;
+    uint_fast8_t d;
 
-#ifdef IDE_REG_CONTROL
+#ifdef IDE_HAS_RESET
     devide_reset();
 #endif
 
     for(d=0; d < IDE_DRIVE_COUNT; d++)
         devide_init_drive(d);
 }
+
+#endif /* CONFIG_IDE */

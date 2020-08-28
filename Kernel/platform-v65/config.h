@@ -43,3 +43,6 @@
 #define NMOUNTS	 2	  /* Number of mounts at a time */
 
 #define platform_discard()
+#define platform_copyright()
+
+#define BOOTDEVICENAMES "hd#"

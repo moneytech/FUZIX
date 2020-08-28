@@ -6,14 +6,12 @@
 #undef CONFIG_PROFIL
 /* Multiple processes in memory at once */
 #define CONFIG_MULTI
-/* Single tasking */
-#undef CONFIG_SINGLETASK
 /* CP/M emulation */
 #undef CONFIG_CPM_EMU
 /* Fixed banking: 8 x 64K banks, top 4KB is shared with kernel, 60KB-62KB is user memory  */
 #define CONFIG_BANK_FIXED
 /* Permit large I/O requests to bypass cache and go direct to userspace */
-#define CONFIG_LARGE_IO_DIRECT
+#define CONFIG_LARGE_IO_DIRECT(x)	1
 /* 8 60K banks, 1 is kernel */
 #define MAX_MAPS	8
 #define MAP_SIZE	PROGTOP    /* WRS: I feel this should be 60KB, but setting it so breaks pagemap_realloc() when exec calls it */
@@ -53,6 +51,7 @@
 
 /* On-board DS1302 on Mark IV, we can read the time of day from it */
 #define CONFIG_RTC
+#define CONFIG_RTC_FULL
 #define CONFIG_RTC_INTERVAL 30 /* deciseconds between reading RTC seconds counter */
 
 /* Memory backed devices */
@@ -82,3 +81,5 @@
 	/* ASCI0 as the console */
 	#define TTYDEV   (512+1)  /* System console (used by kernel, init) */
 #endif
+
+#define platform_copyright()

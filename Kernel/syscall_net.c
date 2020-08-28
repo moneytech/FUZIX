@@ -11,6 +11,8 @@ uint32_t our_address = 0xC0000001;
 uint32_t our_address = 0x010000C0;
 #endif
 
+#define IN2SOCK(ino)		(sockets + (ino)->c_node.i_addr[0])
+
 static uint16_t nextauto = 5000;
 
 bool issocket(inoptr ino)
@@ -22,7 +24,7 @@ bool issocket(inoptr ino)
 
 int sock_write(inoptr ino, uint8_t flag)
 {
-	struct socket *s = &sockets[ino->c_node.i_nlink];
+	struct socket *s = IN2SOCK(ino);
 	int r;
 
 	/* FIXME: IRQ protection */
@@ -45,7 +47,7 @@ int sock_write(inoptr ino, uint8_t flag)
 			default:
 				return r;
 		}
-		if (s->s_iflag == SI_THROTTLE &&
+		if ((s->s_iflag & SI_THROTTLE) &&
 			psleep_flags(&s->s_iflag, flag) == -1)
 				return -1;
 	}
@@ -53,7 +55,7 @@ int sock_write(inoptr ino, uint8_t flag)
 
 int sock_read(inoptr ino, uint8_t flag)
 {
-	struct socket *s = &sockets[ino->c_node.i_nlink];
+	struct socket *s = IN2SOCK(ino);
 	return net_read(s, flag);
 }
 
@@ -91,7 +93,7 @@ static int sock_wait_enter(struct socket *s, uint8_t flag, uint8_t state)
 static struct socket *alloc_socket(void)
 {
 	irqflags_t irq = di();
-	struct socket *s = sockets;
+	regptr struct socket *s = sockets;
 	while (s < sockets + NSOCKET) {
 		if (s->s_state == SS_UNUSED) {
 			s->s_state = SS_INIT;
@@ -107,7 +109,7 @@ static struct socket *alloc_socket(void)
 
 struct socket *sock_alloc_accept(struct socket *s)
 {
-	struct socket *n = alloc_socket();
+	regptr struct socket *n = alloc_socket();
 	int sockno;
 	if (n == NULL)
 		return NULL;
@@ -128,14 +130,17 @@ void sock_wake_listener(struct socket *s)
 void sock_close(inoptr ino)
 {
 	/* For the moment */
-	struct socket *s = &sockets[ino->c_node.i_nlink];
+	struct socket *s = IN2SOCK(ino);;
 	net_close(s);
-	sock_wait_enter(s, 0, SS_CLOSED);
+	/* Dead but not unbound from netd activity yet */
+	s->s_state = SS_DEAD;
+}
+
+void sock_closed(struct socket *s)
+{
 	s->s_state = SS_UNUSED;
-	/* You re-use something you pays the price. Probably should switch
-	   to using data 0 as devices do ? FIXME */
-	ino->c_node.i_nlink = 0;
-	ino->c_flags |= CDIRTY;
+	s->s_ino->c_node.i_addr[0] = 0;
+	s->s_ino->c_flags |= CDIRTY;
 }
 
 /*
@@ -151,8 +156,8 @@ void sock_close(inoptr ino)
  */
 struct socket *sock_find(uint8_t type, uint8_t sv, struct sockaddrs *sa)
 {
-	struct socket *sp;
-	struct sockaddrs *a;
+	regptr struct socket *sp;
+	regptr struct sockaddrs *a;
 
 	for (sp = sockets; sp < sockets + NSOCKET; sp++) {
 		a = &sp->s_addr[sv];
@@ -182,7 +187,7 @@ static struct socket *sock_get(int fd, uint8_t *flag)
 		oftp = of_tab + udata.u_files[fd];
 		*flag = oftp->o_access;
 	}
-	return sockets + ino->c_node.i_nlink;
+	return IN2SOCK(ino);
 }
 
 static struct socket *sock_pending(struct socket *l)
@@ -325,11 +330,12 @@ arg_t make_socket(struct sockinfo *s, struct socket **np)
 	if (!(ino = i_open(root_dev, 0)))
 		goto noalloc;
 	/* All good - now set it up */
-	/* The nlink cheat needs to be taught to fsck! */
 	ino->c_node.i_mode = F_SOCK | 0777;
-	ino->c_node.i_nlink = n->s_num;	/* Cheat !! */
+	ino->c_node.i_addr[0] = n->s_num;
 	ino->c_readers = 1;
 	ino->c_writers = 1;
+
+	n->s_ino = ino;
 
 	of_tab[oftindex].o_inode = ino;
 	of_tab[oftindex].o_access = O_RDWR;
@@ -470,7 +476,7 @@ arg_t _connect(void)
 		if (net_connect(s))
 			return -1;
 		if (sock_wait_leave(s, 0, SS_CONNECTING)) {
-			/* API oddity, thanks Berkley */
+			/* API oddity, thanks Berkeley */
 			if (udata.u_error == EAGAIN)
 				udata.u_error = EINPROGRESS;
 			return -1;
@@ -564,28 +570,52 @@ struct sockio *addr;	control buffer
 
 arg_t _sendto(void)
 {
-	struct socket *s = sock_get(fd, NULL);
+	regptr struct socket *s = sock_get(fd, NULL);
 	struct sockaddr_in sin;
 	uint16_t flags;
+	uint16_t alen;
+	uint16_t err;
 
 	if (s == NULL)
 		return -1;
 
+	if (s->s_state == SS_UNCONNECTED) {
+		err = sock_autobind(s);
+		if (err)
+			return err;
+	}
+	if (s->s_state < SS_BOUND) {
+		udata.u_error = EINVAL;
+		return -1;
+	}
+	if (s->s_state != SS_BOUND && s->s_state < SS_CONNECTED) {
+		udata.u_error = ENOTCONN;
+		return -1;
+	}
 	flags = ugetw(&uaddr->sio_flags);
 	if (flags) {
 		udata.u_error = EINVAL;
 		return -1;
 	}
+	alen = ugetw(&uaddr->sio_flags);
 	/* Save the address and then just do a 'write' */
-	if (s->s_type != SOCKTYPE_TCP) {
+	if (s->s_type != SOCKTYPE_TCP && alen) {
+		if (s->s_state >= SS_CONNECTING) {
+			udata.u_error = EISCONN;
+			return -1;
+		}
 		/* Use the address in atmp */
-		/* FIXME: if this is allowable we either need to do this
-		   differently or we need to block sendto + connect */
 		s->s_flag |= SFLAG_ATMP;
 		if (sa_getremote(&uaddr->sio_addr, &sin) == -1)
 			return -1;
 		s->s_addr[SADDR_TMP].addr = sin.sin_addr.s_addr;
 		s->s_addr[SADDR_TMP].port = sin.sin_port;
+	} else {
+		s->s_flag &= ~SFLAG_ATMP;
+		if (s->s_state < SS_CONNECTED) {
+			udata.u_error = EDESTADDRREQ;
+			return -1;
+		}
 	}
 	return _write();
 }
@@ -660,7 +690,6 @@ arg_t _shutdown(void)
 #undef fd
 #undef how
 
-#endif
 
 /* FIXME: Move to _discard */
 
@@ -672,3 +701,5 @@ void sock_init(void)
 		(s++)->s_num = n++;
 	netdev_init();
 }
+
+#endif

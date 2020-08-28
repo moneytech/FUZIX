@@ -12,17 +12,16 @@
  *	and leaks.
  */
 
-/*
- *	MAX_POOLS is the number of discontiguous memory pools we have.
- */
-
 #if defined(CONFIG_32BIT)
+
+static uint32_t mfree;
+static uint32_t mtotal;
 
 #undef DEBUG_MEMORY
 
 struct block
 {
-	struct block* next;
+	struct block *next;
 	size_t length; /* high bit set if used */
 };
 
@@ -31,12 +30,13 @@ struct block
 static struct block start = { NULL, sizeof(struct block) };
 
 /*
- * Add a memory block to the pool
+ * Add a memory block to the pool. Must be aligned to the alginment boundary
+ * in use.
  */
 void kmemaddblk(void *base, size_t size)
 {
-	struct block* b = &start;
-	struct block* n = (struct block*) base;
+	struct block *b = &start;
+	struct block *n = (struct block *) base;
 
 	/* Run down the list until we find the last block. */
 
@@ -48,19 +48,21 @@ void kmemaddblk(void *base, size_t size)
 	b->next = n;
 	n->next = NULL;
 	n->length = size;
-	#if defined(DEBUG_MEMORY)
-		kprintf("mem: add %x+%x\n", n, n->length);
-	#endif
+#if defined(DEBUG_MEMORY)
+	kprintf("mem: add %p+%p\n", n, n->length);
+#endif
+	mfree += size;
+	mtotal += size;
 }
 
 /*
  * Find the smallest unused block containing at least length bytes.
  */
-static struct block* find_smallest(size_t length)
+static struct block *find_smallest(size_t length)
 {
 	static struct block dummy = { NULL, 0x7fffffff };
-	struct block* smallest = &dummy;
-	struct block* b = &start;
+	struct block *smallest = &dummy;
+	struct block *b = &start;
 
 	while (b->next)
 	{
@@ -81,22 +83,22 @@ static struct block* find_smallest(size_t length)
  * Split the supplied block into a used section and an unused section
  * immediately following it (if big enough).
  */
-static void split_block(struct block* b, size_t size)
+static void split_block(struct block *b, size_t size)
 {
 	int32_t newsize = b->length - size; /* might be negative */
-	if (newsize > sizeof(struct block)*4)
+	if (newsize > sizeof(struct block) * 4)
 	{
-		struct block* n = (struct block*)((uint8_t*)b + size);
-		#if defined(DEBUG_MEMORY)
-			kprintf("mem: split %x+%x -> ", b, b->length);
-		#endif
+		struct block *n = (struct block *)((uint8_t *)b + size);
+#if defined(DEBUG_MEMORY)
+		kprintf("mem: split %p+%p -> ", b, b->length);
+#endif
 		n->next = b->next;
 		b->next = n;
 		b->length = size;
 		n->length = newsize;
-		#if defined(DEBUG_MEMORY)
-			kprintf("%x+%x and %x+%x\n", b, b->length, n, n->length);
-		#endif
+#if defined(DEBUG_MEMORY)
+		kprintf("%p+%p and %p+%p\n", b, b->length, n, n->length);
+#endif
 	}
 
 	b->length |= 0x80000000;
@@ -105,20 +107,23 @@ static void split_block(struct block* b, size_t size)
 /*
  * Allocate a block.
  */
-void* kmalloc(size_t size)
+void *kmalloc(size_t size, uint8_t owner)
 {
-	struct block* b;
+	struct block *b;
 
+	used(owner);	/* For now */
 	size = ALIGNUP(size) + sizeof(struct block);
 	b = find_smallest(size);
 	if (!b)
 		return NULL;
 
 	split_block(b, size);
-	#if defined(DEBUG_MEMORY)
-		kprintf("mem: alloc %x+%x\n", b, b->length);
-	#endif
-	return b+1;
+#if defined(DEBUG_MEMORY)
+	kprintf("mem: alloc %p+%p\n", b, b->length);
+	kprintf("malloc allocates %p\n", b + 1);
+#endif
+	mfree -= b->length;
+	return b + 1;
 }
 
 /*
@@ -126,26 +131,27 @@ void* kmalloc(size_t size)
  */
 static void merge_all_blocks(void)
 {
-	struct block* b = &start;
+	struct block *b = &start;
 
 	while (b->next)
 	{
-		struct block* n = b->next;
+		struct block *n = b->next;
 
 		if (UNUSED(b)
 			&& UNUSED(n)
 			&& (((uint8_t*)b + b->length) == (uint8_t*)n))
 		{
 			/* Two mergeable blocks are adjacent. */
-			#if defined(DEBUG_MEMORY)
-				kprintf("mem: merge %x+%x and %x+%x -> ",
-					b, b->length, n, n->length);
-			#endif
+#if defined(DEBUG_MEMORY)
+			kprintf("mem: merge %p+%p and %p+%p -> ",
+				b, b->length, n, n->length);
+#endif
 			b->next = n->next;
 			b->length += n->length;
-			#if defined(DEBUG_MEMORY)
-				kprintf("%x+%x\n", b, b->length);
-			#endif
+#if defined(DEBUG_MEMORY)
+			kprintf("%p+%p\n", b, b->length);
+			kprintf("next now %p\n", b->next);
+#endif
 		}
 		else
 		{
@@ -160,18 +166,39 @@ static void merge_all_blocks(void)
  * Free a block. If there's a block immediately after this one, merge it.
  * (This maintains ordering within split blocks.)
  */
-void kfree(void* p)
+void kfree(void *p)
 {
-	struct block* b = (struct block*)p - 1;
-	#if defined(DEBUG_MEMORY)
-		kprintf("mem: free %x+%x\n", b, b->length);
-	#endif
+	struct block *b = (struct block *)p - 1;
+
+	if (p == NULL)
+		return;
+#if defined(DEBUG_MEMORY)
+	kprintf("mem: free %p+%p\n", b, b->length);
+	kprintf("malloc frees %p\n", p);
+#endif
 
 	if (UNUSED(b))
 		panic(PANIC_BADFREE);
 	
 	b->length &= 0x7fffffff;
+	mfree += b->length;
 	merge_all_blocks();
+}
+
+void kfree_s(void *p, size_t unused)
+{
+	/* FIXME: we could do length checks ? */
+	kfree(p);
+}
+
+unsigned long kmemavail(void)
+{
+	return mfree;
+}
+
+unsigned long kmemused(void)
+{
+	return mtotal - mfree;
 }
 
 #endif

@@ -16,15 +16,19 @@
 	    .globl map_kernel
 	    .globl map_process
 	    .globl map_process_always
-	    .globl map_save
+	    .globl map_kernel_di
+	    .globl map_process_di
+	    .globl map_process_always_di
+	    .globl map_save_kernel
 	    .globl map_restore
 	    .globl platform_interrupt_all
 	    .globl _need_resched
 	    .globl _irqwork
+	    .globl _int_disabled
 
             ; exported debugging tools
-            .globl _trap_monitor
-            .globl _trap_reboot
+            .globl _platform_monitor
+            .globl _platform_reboot
             .globl outchar
 
             ; imported symbols
@@ -35,7 +39,6 @@
             .globl istack_top
             .globl istack_switched_sp
             .globl unix_syscall_entry
-            .globl trap_illegal
 	    .globl null_handler
             .globl _timer_interrupt
 	    .globl nmi_handler
@@ -48,7 +51,7 @@
 
             .include "socz80.def"
             .include "kernel.def"
-            .include "../kernel.def"
+            .include "../kernel-z80.def"
 
 ; -----------------------------------------------------------------------------
 ; COMMON MEMORY BANK (0xF000 upwards)
@@ -56,6 +59,8 @@
             .area _COMMONMEM
 _need_resched:
 	    .db 0
+_int_disabled:
+	    .db 1
 trapmsg:    .ascii "Trapdoor: SP="
             .db 0
 trapmsg2:   .ascii ", PC="
@@ -67,8 +72,8 @@ tm_stack:
 tm_stack_top:
 
 ; For now both hit monitor
-_trap_reboot:
-_trap_monitor:
+_platform_reboot:
+_platform_monitor:
             ; stash SP
             ld (tm_user_sp), sp
             ; switch to temporary stack
@@ -203,7 +208,7 @@ _tty_writeready:
             jr z, uart0wr
             cp #2
             jr z, uart1wr
-            call _trap_monitor
+            call _platform_monitor
             ret ; not a console we recognise
 uart1wr:    in a, (UART1_STATUS)
             jr testready
@@ -356,23 +361,18 @@ _program_vectors:
             ld hl, #interrupt_handler
             ld (0x39), hl
 
-            ; set restart vector for UZI system calls
+            ; set restart vector for Fuzix system calls
             ld (0x30), a   ;  (rst 30h is unix function call vector)
             ld hl, #unix_syscall_entry
             ld (0x31), hl
 
-            ; Set vector for Illegal Instructions (this is presuambly a Z180 CPU feature? Z80 doesn't do this)
-            ld (0x0), a
-            ld hl, #trap_illegal   ;   to Our Trap Handler
-            ld (0x1), hl
-
-            ld (0x0000), a
+            ld (0x00), a
             ld hl, #null_handler   ;   to Our Trap Handler
-            ld (0x0001), hl
+            ld (0x01), hl
 
             ld (0x66), a  ; Set vector for NMI
             ld hl, #nmi_handler
-            ld (0x0067), hl
+            ld (0x67), hl
 
 	    call map_kernel
 	    ret
@@ -390,6 +390,7 @@ mmumsg:     .ascii "MMU page "
 ; HL points to the page array for this task, or NULL for kernel
 ; Preserve all but a, hl
 map_process:
+map_process_di:
 	    ld a, h
  	    or l
 	    jr nz, map_loadhl
@@ -400,8 +401,9 @@ map_process:
 ; map the current process, preserves all registers
 ;
 map_process_always:
+map_process_always_di:
 	    push hl
-	    ld hl, #U_DATA__U_PAGE
+	    ld hl, #_udata + U_DATA__U_PAGE
 	    call map_loadhl
 	    pop hl
 	    ret
@@ -409,6 +411,7 @@ map_process_always:
 ; map the kernel. preserves all registers
 ;
 map_kernel:
+map_kernel_di:
 	    push hl
 	    ld hl, #os_bank
 	    call map_loadhl
@@ -423,7 +426,7 @@ map_restore:
 	    pop hl
             ret
 
-map_save:
+map_save_kernel:
 	    ; FIXME: Save the current mapping registers. Preserves all
 	    ; registers
 	    push hl
@@ -431,6 +434,8 @@ map_save:
 	    ld (saved_map), hl
 	    ld hl, (map_current + 2)
 	    ld (saved_map + 2), hl
+	    ld hl, #os_bank
+	    call map_loadhl
 	    pop hl
 	    ret
 

@@ -3,48 +3,56 @@
 #include <printf.h>
 #include <stdbool.h>
 #include <devtty.h>
-#include <device.h>
 #include <tty.h>
 
 volatile uint8_t *uart_data = (volatile uint8_t *)0xF03000;	/* UART data */
 volatile uint8_t *uart_status = (volatile uint8_t *)0xF03010;	/* UART status */
 
-unsigned char tbuf1[TTYSIZ];
+static unsigned char tbuf1[TTYSIZ];
 
 struct s_queue ttyinq[NUM_DEV_TTY + 1] = {	/* ttyinq[0] is never used */
 	{NULL, NULL, NULL, 0, 0, 0},
 	{tbuf1, tbuf1, tbuf1, TTYSIZ, 0, TTYSIZ / 2},
 };
 
+tcflag_t termios_mask[NUM_DEV_TTY + 1] = {
+	0,
+	_CSYS
+};
+
 /* Output for the system console (kprintf etc) */
-void kputchar(char c)
+void kputchar(uint_fast8_t c)
 {
 	if (c == '\n')
 		tty_putc(1, '\r');
 	tty_putc(1, c);
 }
 
-ttyready_t tty_writeready(uint8_t minor)
+ttyready_t tty_writeready(uint_fast8_t minor)
 {
 	uint8_t c = *uart_status;
 	return (c & 2) ? TTY_READY_NOW : TTY_READY_SOON; /* TX DATA empty */
 }
 
-void tty_putc(uint8_t minor, unsigned char c)
+void tty_putc(uint_fast8_t minor, uint_fast8_t c)
 {
 	*uart_data = c;	/* Data */
 }
 
-void tty_setup(uint8_t minor)
+void tty_setup(uint_fast8_t minor, uint_fast8_t flags)
 {
 }
 
-int tty_carrier(uint8_t minor)
+int tty_carrier(uint_fast8_t minor)
 {
 	return 1;
 }
 
-void tty_sleeping(uint8_t minor)
+void tty_sleeping(uint_fast8_t minor)
+{
+}
+
+void tty_data_consumed(uint_fast8_t minor)
 {
 }
 

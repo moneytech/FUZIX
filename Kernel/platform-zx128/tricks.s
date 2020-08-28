@@ -7,11 +7,9 @@
 
         .globl _ptab_alloc
         .globl _newproc
-        .globl _chksigs
         .globl _getproc
-        .globl _trap_monitor
-        .globl trap_illegal
-        .globl _switchout
+        .globl _platform_monitor
+        .globl _platform_switchout
         .globl _switchin
 	.globl _low_bank
 	.globl _dup_low_page
@@ -27,7 +25,7 @@
         .globl outstring, outde, outhl, outbc, outnewline, outchar, outcharhex
 
         .include "kernel.def"
-        .include "../kernel.def"
+        .include "../kernel-z80.def"
 
         .area _COMMONMEM
 
@@ -35,13 +33,8 @@
 ; possibly the same process, and switches it in.  When a process is
 ; restarted after calling switchout, it thinks it has just returned
 ; from switchout().
-;
-; This function can have no arguments or auto variables.
-_switchout:
+_platform_switchout:
         di
-	push af
-        call _chksigs
-	pop af
         ; save machine state
 
         ld hl, #0 ; return code set here is ignored, but _switchin can 
@@ -50,7 +43,7 @@ _switchout:
         push hl ; return code
         push ix
         push iy
-        ld (U_DATA__U_SP), sp ; this is where the SP is restored in _switchin
+        ld (_udata + U_DATA__U_SP), sp ; this is where the SP is restored in _switchin
 
 	;
 	; We are now running on the sleeping process stack. The switchin
@@ -59,14 +52,14 @@ _switchout:
 	;
 
 	; Stash the uarea back into process memory
-	ld hl, (U_DATA__U_PAGE)
+	ld hl, (_udata + U_DATA__U_PAGE)
 	ld a, l
 	ld bc, #0x7ffd
 	or #0x18
 	out (c), a
 
 	; This includes the stacks, so be careful on restore
-	ld hl, #U_DATA
+	ld hl, #_udata
 	ld de, #U_DATA_STASH
 	ld bc, #U_DATA__TOTALSIZE
 	ldir
@@ -86,7 +79,7 @@ _switchout:
         call _switchin
 
         ; we should never get here
-        call _trap_monitor
+        call _platform_monitor
 
 badswitchmsg: .ascii "_switchin: FAIL"
             .db 13, 10, 0
@@ -153,7 +146,7 @@ not_swapped:
 	;
 	exx
 	ld hl, #U_DATA_STASH
-	ld de, #U_DATA
+	ld de, #_udata
 	ld bc, #U_DATA__TOTALSIZE
 	ldir
 	exx
@@ -211,27 +204,27 @@ flip1:
 nofliplow:
 
         ; check u_data->u_ptab matches what we wanted
-        ld hl, (U_DATA__U_PTAB) ; u_data->u_ptab
+        ld hl, (_udata + U_DATA__U_PTAB) ; u_data->u_ptab
         or a                    ; clear carry flag
         sbc hl, de              ; subtract, result will be zero if DE == HL
         jr nz, switchinfail
 
 	; wants optimising up a bit
-	ld ix, (U_DATA__U_PTAB)
+	ld ix, (_udata + U_DATA__U_PTAB)
         ; next_process->p_status = P_RUNNING
         ld P_TAB__P_STATUS_OFFSET(ix), #P_RUNNING
 
 	; Fix any moved page pointers
 	; Just do one byte as that is all we use on this platform
 	ld a, P_TAB__P_PAGE_OFFSET(ix)
-	ld (U_DATA__U_PAGE), a
+	ld (_udata + U_DATA__U_PAGE), a
         ; runticks = 0
         ld hl, #0
         ld (_runticks), hl
 
         ; restore machine state -- note we may be returning from either
         ; _switchout or _dofork
-        ld sp, (U_DATA__U_SP)
+        ld sp, (_udata + U_DATA__U_SP)
 
 	;
 	; We can now use the stack again
@@ -242,7 +235,7 @@ nofliplow:
         pop hl ; return code
 
         ; enable interrupts, if the ISR isn't already running
-        ld a, (U_DATA__U_ININTERRUPT)
+        ld a, (_udata + U_DATA__U_ININTERRUPT)
         or a
         ret nz ; in ISR, leave interrupts off
         ei
@@ -253,7 +246,7 @@ switchinfail:
         ld hl, #badswitchmsg
         call outstring
 	; something went wrong and we didn't switch in what we asked for
-        jp _trap_monitor
+        jp _platform_monitor
 
 ; Interrupts should be off when this is called
 _dup_low_page:
@@ -310,7 +303,7 @@ _dofork:
         ; _switchin which will immediately return (appearing to be _dofork()
 	; returning) and with HL (ie return code) containing the child PID.
         ; Hurray.
-        ld (U_DATA__U_SP), sp
+        ld (_udata + U_DATA__U_SP), sp
 
         ; now we're in a safe state for _switchin to return in the parent
 	; process.
@@ -326,7 +319,7 @@ _dofork:
         add hl, de
         ; load p_page
         ld c, (hl)
-	ld hl, (U_DATA__U_PAGE)
+	ld hl, (_udata + U_DATA__U_PAGE)
 	ld a, l
 
 	;
@@ -349,7 +342,7 @@ _dofork:
 
 	; Copy done
 
-	ld a, (U_DATA__U_PAGE)	; parent memory
+	ld a, (_udata + U_DATA__U_PAGE)	; parent memory
 	or #0x18		; get the right ROMs
 	ld bc, #0x7ffd
 	out (c), a		; Switch context to parent in 0xC000+
@@ -357,7 +350,7 @@ _dofork:
 	; We are going to copy the uarea into the parents uarea stash
 	; we must not touch the parent uarea after this point, any
 	; changes only affect the child
-	ld hl, #U_DATA		; copy the udata from common into the
+	ld hl, #_udata		; copy the udata from common into the
 	ld de, #U_DATA_STASH	; target process
 	ld bc, #U_DATA__TOTALSIZE
 	ldir

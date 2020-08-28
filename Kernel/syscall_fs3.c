@@ -10,26 +10,23 @@ char *name;
 int16_t flag;
 int16_t mode;
 ********************************************/
-#define name (char *)udata.u_argn
+#define name (uint8_t *)udata.u_argn
 #define flag (uint16_t)udata.u_argn1
 #define mode (uint16_t)udata.u_argn2
 
 arg_t _open(void)
 {
-	int8_t uindex;
-	int8_t oftindex;
+	int_fast8_t uindex;
+	int_fast8_t oftindex;
 	staticfast inoptr ino;
 	int16_t perm;
 	staticfast inoptr parent;
-	char fname[FILENAME_LEN + 1];
-	int trunc;
 	int r;
 	int w;
 	int j;
 
 	parent = NULLINODE;
 
-	trunc = flag & O_TRUNC;
 	r = (flag + 1) & 1;
 	w = (flag + 1) & 2;
 
@@ -43,7 +40,7 @@ arg_t _open(void)
 	if ((oftindex = oft_alloc()) == -1)
 		goto nooft;
 
-	ino = n_open(name, &parent);
+	ino = n_open_lock(name, &parent);
 	if (ino) {
 		i_deref(parent);
 		/* O_EXCL test */
@@ -61,10 +58,8 @@ arg_t _open(void)
 			udata.u_error = ENOENT;
 			goto cantopen;
 		}
-		filename(name, fname);
-
-		/* newfile drops parent for us */
-		ino = newfile(parent, fname);
+		/* newfile drops parent for us, ino is now locked */
+		ino = newfile(parent, lastname);
 		if (!ino) {
 			/* on error, newfile sets udata.u_error */
 			goto cantopen;
@@ -83,37 +78,36 @@ arg_t _open(void)
 	perm = getperm(ino);
 	if ((r && !(perm & OTH_RD)) || (w && !(perm & OTH_WR))) {
 		udata.u_error = EACCES;
-		goto cantopen;
+		goto idrop;
 	}
 	if (w) {
 		if (getmode(ino) == MODE_R(F_DIR)) {
 			udata.u_error = EISDIR;
-			goto cantopen;
+			goto idrop;
 		}
 		/* Special case - devices on a read only file system may
 		   be opened read/write */
 		if (!isdevice(ino) && (ino->c_flags & CRDONLY)) {
 			udata.u_error = EROFS;
-			goto cantopen;
+			goto idrop;
 		}
 	}
-
+	/* FIXME: run isdevice once ? */
 	if (isdevice(ino)) {
 		inoptr *iptr = &of_tab[oftindex].o_inode;
 		/* d_open may block and thus ino may become invalid as may
 		   parent (but we don't need it again). It may also be changed
 		   by the call to dev_openi */
 
+		i_unlock(*iptr);
 		if (dev_openi(iptr, flag) != 0)
 			goto cantopen;
-
 		/* May have changed */
 		/* get the static pointer back in case it changed via dev 
 		   usage or just because we blocked */
 		ino = *iptr;
-	}
-
-	if (w && trunc && getmode(ino) == MODE_R(F_REG)) {
+		i_lock(ino);
+	} else if (w && (flag & O_TRUNC) && getmode(ino) == MODE_R(F_REG)) {
 		if (f_trunc(ino))
 			goto idrop;
 		for (j = 0; j < OFTSIZE; ++j)
@@ -134,23 +128,34 @@ arg_t _open(void)
 	if (O_ACCMODE(flag) != O_WRONLY)
 		ino->c_readers++;
 
+	i_unlock(ino);
+
 	/* FIXME: ATIME ? */
-/*
- *         Sleep process if no writer or reader.
- *	   FIXME: check for other of pair now we have proper counts
- */
-	if (getmode(ino) == MODE_R(F_PIPE) && of_tab[oftindex].o_refs == 1
-	    && !(flag & O_NDELAY))
-		psleep(ino);
+
+	if (getmode(ino) == MODE_R(F_PIPE)) {
+		if (of_tab[oftindex].o_refs == 1
+			    && !(flag & O_NDELAY)) {
+			psleep(ino);
+			if (chksigs()) {
+				udata.u_error = EINTR;
+				goto idrop;
+			}
+		}
+		if ((ino->c_writers == 0) && (flag & O_NDELAY)) {
+			udata.u_error = ENXIO;
+			goto idrop;
+		}
+	}
 
         /* From the moment of the psleep ino is invalid */
 
 	return (uindex);
-      idrop:
-	i_deref(ino);
-      cantopen:
+idrop:
+	i_unlock(ino);
+	/* Falls through and drops the reference count */
+cantopen:
 	oft_deref(oftindex);	/* This will call i_deref() */
-      nooft:
+nooft:
 	udata.u_files[uindex] = NO_FILE;
 	return (-1);
 }
@@ -166,21 +171,22 @@ link (name1, name2)               Function 5
 char *name1;
 char *name2;
 ********************************************/
-#define name1 (char *)udata.u_argn
-#define name2 (char *)udata.u_argn1
+#define name1 (uint8_t *)udata.u_argn
+#define name2 (uint8_t *)udata.u_argn1
 
 arg_t _link(void)
 {
 	inoptr ino;
 	inoptr ino2;
 	inoptr parent2;
-	char fname[FILENAME_LEN + 1];
 
 	if (!(ino = n_open(name1, NULLINOPTR)))
 		return (-1);
 
-	if (getmode(ino) == MODE_R(F_DIR) && esuper())
+	if (getmode(ino) == MODE_R(F_DIR)) {
+		udata.u_error = EISDIR;
 		goto nogood;
+	}
 
 	if (ino->c_node.i_nlink == 0xFFFF) {
 		udata.u_error = EMLINK;
@@ -204,11 +210,10 @@ arg_t _link(void)
 		goto nogood;
 	}
 
-	filename(name2, fname);
-
-	if (!ch_link(parent2, "", fname, ino)) {
-		i_deref(parent2);
-		goto nogood;
+	i_lock(parent2);
+	if (!ch_link(parent2, (uint8_t *)"", lastname, ino)) {
+		i_unlock_deref(parent2);
+		goto nogoodl;
 	}
 
 	/* Update the link count. */
@@ -216,11 +221,13 @@ arg_t _link(void)
 	wr_inode(ino);
 	setftime(ino, C_TIME);
 
-	i_deref(parent2);
+	i_unlock_deref(parent2);
 	i_deref(ino);
 	return 0;
 
-      nogood:
+nogoodl:
+	i_unlock(ino);
+nogood:
 	i_deref(ino);
 	return -1;
 }
@@ -256,7 +263,7 @@ arg_t _fcntl(void)
 							O_NDELAY));
 		return 0;
 	case F_GETFL:
-		return data;
+		return *acc;
 	case F_GETFD:
 		return udata.u_cloexec & (1 << fd) ? O_CLOEXEC : 0;
 	case F_SETFD:
@@ -290,7 +297,7 @@ We pass a set of \0 terminated strings, don't bother
 with node name. Rest is up to the libc.
 ********************************************/
 
-#define buf (char *)udata.u_argn
+#define buf (uint8_t *)udata.u_argn
 #define len (uint16_t)udata.u_argn1
 
 arg_t _uname(void)
@@ -325,7 +332,7 @@ Perform locking upon a file.
 arg_t _flock(void)
 {
 	inoptr ino;
-	struct oft *o;
+	regptr struct oft *o;
 	staticfast uint8_t c;
 	staticfast uint8_t lock;
 	staticfast int self;

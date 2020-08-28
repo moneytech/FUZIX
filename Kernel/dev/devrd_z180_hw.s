@@ -14,7 +14,7 @@
         .globl _devmem_write
 
         .include "kernel.def"
-        .include "../kernel.def"
+        .include "../kernel-z80.def"
         .include "../cpu-z180/z180.def"
 
         .area _CODE
@@ -30,19 +30,20 @@ _devmem_read:
 _devmem_go:
         ld (_rd_dst_userspace), a       ; 1 = userspace
         ; load the other parameters
-        ld hl, (U_DATA__U_BASE)
+        ld hl, (_udata + U_DATA__U_BASE)
         ld (_rd_dst_address), hl
-        ld hl, (U_DATA__U_COUNT)
+        ld hl, (_udata + U_DATA__U_COUNT)
         ld (_rd_cpy_count), hl
-        ld hl, (U_DATA__U_OFFSET)
+        ld hl, (_udata + U_DATA__U_OFFSET)
         ld (_rd_src_address), hl
-        ld hl, (U_DATA__U_OFFSET+2)
+        ld hl, (_udata + U_DATA__U_OFFSET+2)
         ld (_rd_src_address+2), hl
         ; FALL THROUGH INTO _rd_platform_copy
 
 ;=========================================================================
 ; _rd_page_copy - Copy data from one physical page to another
 ; See notes in devrd.h for input parameters
+; This code is Z180 specific so can safely use ld a,i
 ;=========================================================================
 _rd_platform_copy:
         ; save interrupt flag on stack then disable interrupts
@@ -62,7 +63,7 @@ _rd_platform_copy:
         ld hl, #(OS_BANK + FIRST_RAM_BANK) << 4
         jr rd_done_translate
 rd_translate_userspace:
-        ld hl,(U_DATA__U_PAGE)          ; load page number
+        ld hl,(_udata + U_DATA__U_PAGE)          ; load page number
         add hl, hl                      ; shift left 4 bits
         add hl, hl
         add hl, hl

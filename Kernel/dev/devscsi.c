@@ -15,6 +15,8 @@
 #include <devscsi.h>
 #include <blkdev.h>
 
+#ifdef CONFIG_SCSI
+
 /* The live command block */
 struct Sidcmd si_dcb;
 uint8_t si_user;
@@ -23,13 +25,14 @@ uint8_t si_user;
 static struct Sierr error;
 static uint8_t status[2];
 
+
 /*
- *	Si_cmdend()	Wait till end of scsi comand and return errors.
+ *	Si_cmdend()	Wait till end of scsi command and return errors.
  */
 static uint8_t si_cmdend(void) {
 	int err;
 
-	status[0] = -1;
+	status[0] = 0xFF;
 	si_dcb.length = 2;
 	si_user = 0;
 	/* Gets status and message byte */
@@ -160,7 +163,7 @@ uint8_t si_cmd(void)
 
 /* This needs plumbing into a /dev/sg device off devsys */
 
-int si_ioctl(uint8_t dev, uarg_t req, char *data)
+int si_ioctl(uint_fast8_t dev, uarg_t req, char *data)
 {
 	struct	Siioctl sip;
 
@@ -189,3 +192,5 @@ int si_flush(void)
 {
         return 0;
 }
+
+#endif /* CONFIG_SCSI */

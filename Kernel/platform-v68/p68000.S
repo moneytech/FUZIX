@@ -4,21 +4,20 @@
  *	Lots left to fill in
  */
 
-		.globl trap_reboot
+		.globl platform_reboot
 		.globl init_early
 		.globl init_hardware
 		.globl program_vectors
 		.globl outchar
-		.globl trap_monitor
+		.globl platform_monitor
 		.globl udata_block
 		.globl devide_read_data
 		.globl devide_write_data
-		.globl vdso
 .mri 1
-trap_reboot:
-trap_monitor:
+platform_reboot:
+platform_monitor:
 	    or #0700,sr
-	    bra trap_monitor
+	    bra platform_monitor
 
 init_early:
 	    lea.l udata_block,a5	; udata ptr
@@ -29,42 +28,16 @@ init_early:
 ;	FIXME: could be in discard if we wanted
 ;
 init_hardware:
-            ; set system RAM size(hadcode hacks for now) 
+            ; set system RAM size(hardcode hacks for now)
 	    move.w #512,d0
 	    move.w d0,ramsize
 	    sub.w  #64,d0		; Guess for kernel
 	    move.w d0,procmem		; guesses for now
 
-	    move.l #0,a0
-	    move.w #256,d0
-	    move.l #unexpected,d1
-init_trap_loop:
-	    move.l d1,(a0)+
-	    dbra d0,init_trap_loop
-	    ;
-	    ; Now set the vectors we care about
-	    ;
-	    move.w #8,a0
-	    move.l #bus_error,(a0)+
-	    move.l #addr_error,(a0)+
-	    move.l #illegal,(a0)+
-	    move.l #divzero,(a0)+
-	    move.l #chk,(a0)+
-	    move.l #trapv,(a0)+
-	    move.l #priv,(a0)+
-	    move.l #trace,(a0)+
-	    move.l #unimpa,(a0)+	; A and F line traps
-	    move.l #unimpf,(a0)+
-	    move.w #$80,a0
-	    move.w #13,d0
-trapset:
-	    move.l #misctrap,(a0)+
-	    dbra d0,trapset
-	    move.l #trap14,(a0)+
-	    move.l #trap15,(a0)+
+	    bsr install_vectors
+
 	    move.w #$0,a0
-	    move.l #uninit,$3c(a0)
-	    move.l #spurious,$60(a0)
+
 	    move.l #timer_irq,$78(a0)
 	    move.l #mmu_fault,$7C(a0)
 
@@ -84,20 +57,37 @@ timer_irq:
 	    tst.b U_DATA__U_INSYS(a5)
 	    bne no_preempt
 	    tst.b need_resched
-	    bne no_preempt
+	    beq no_preempt
 	    ;
 	    ;	Vanish into the scheduler. Some other task will pop back out
 	    ;   and eventually we'll re-appear here and continue.
 	    ;
 	    ;   FIXME: check IRQ masking
 	    ;
+	    ; We might be in STOPPED state in which case do not go back
+	    ; to ready !
 	    move.l U_DATA__U_PTAB(a5),a0
+	    cmp.b #P_RUNNING,P_TAB__P_STATUS_OFFSET(a0)
+	    bne no_ready
 	    move.b #P_READY,P_TAB__P_STATUS_OFFSET(a0)
+	    ori.b #PFL_BATCH,P_TAB__P_FLAGS_OFFSET(a0)
+no_ready:
+	    move.l U_DATA__U_PTAB(a5),a0
 	    bsr switchout
 no_preempt:
 	    tst.b U_DATA__U_CURSIG(a5)
 	    beq no_signal
-	    bra trap_via_signal		; a0/a1/d0/d1 already stacked
+	    ;   FIXME: this is ugly
+	    movem.l (sp)+,a0-a1/a5/d0-d1
+	    move.w sr,-(sp)
+	    move.w #0,-(sp)
+	    movem.l a0-a6/d0-d7,-(sp)
+	    move.l (sp),-(sp)
+	    bsr exception
+	    addq #4,sp
+	    movem.l (sp)+,a0-a6/d0-d7
+	    addq #4,sp
+	    rte
 
 no_signal:
 	    movem.l (sp)+,a0-a1/a5/d0-d1
@@ -118,7 +108,7 @@ program_vectors:
 	    rts
 
 ;
-;	TODO
+;	We do no banking so we need to do nothing here.
 ;
 map_process_always:
 map_process:
@@ -158,17 +148,3 @@ devide_write_l:
 	dbra d0,devide_write_l
 	rts
 
-;
-;	'VDSO'
-;
-vdso:	trap #14		; syscall entry
-	rts
-	; signal unwind
-	movem.l (sp)+,a0/a1/d0/d1
-	move.w (sp)+,ccr
-	rts
-	; rest is spare for now
-
-.section data
-
-kernel_flag: byte 1

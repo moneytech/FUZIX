@@ -38,7 +38,12 @@ typedef struct dirhd_t {
 	off_t t_size;
 	time_t t_mtime;
 	char *t_name;
+#ifdef __i80
+	/* Work around ack limitation FIXME (in ack) */
+	struct dirhd_t *t_cont[0];
+#else
 	struct dirhd_t *t_cont[];
+#endif
 } dirhd_t;
 
 typedef union tarhd_t {
@@ -888,8 +893,9 @@ typedef struct link_t {
 	ino_t t_ino;
 	unsigned short t_nlink;
 	struct link_t *t_next;
-	char t_link[0];
 } link_t;
+
+#define T_LINK(x)	((char *)(x + 1))
 
 #define	NHASH	64
 
@@ -910,7 +916,7 @@ void filelink(dev_t dev, ino_t ino, unsigned short nlink, char *link)
 		lp->t_dev = dev;
 		lp->t_ino = ino;
 		lp->t_nlink = nlink;
-		strcpy(lp->t_link, link);
+		strcpy(T_LINK(lp), link);
 	}
 }
 
@@ -922,7 +928,7 @@ char *havelink(dev_t dev, ino_t ino, flag_t flag)
 		if (lp->t_ino == ino && lp->t_dev == dev) {
 			if (flag)
 				--lp->t_nlink;
-			return (lp->t_link);
+			return (T_LINK(lp));
 		}
 	}
 	return (NULL);
@@ -942,7 +948,7 @@ void misslink(void)
 				fprintf(stderr,
 					"Tar: missed %d link%s to %s\n",
 					nlink, nlink == 1 ? "" : "s",
-					lp->t_link);
+					T_LINK(lp));
 		}
 	}
 }

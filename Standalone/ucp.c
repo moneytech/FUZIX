@@ -8,6 +8,8 @@ problem, added some missing breaks.
 HP
  ***************************************************/
 
+#define _XOPEN_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,27 +19,24 @@ HP
 #include <libgen.h>
 #define UCP
 #include "fuzix_fs.h"
+#include "util.h"
 
-#define UCP_VERSION  "1.2ac"
+#define UCP_VERSION  "1.4ac"
 
-static int16_t *syserror = (int16_t*)&udata.u_error;
+static int16_t *syserror = (int16_t *) & udata.u_error;
 static char cwd[100];
 static char line[128];
 static char *nextline = NULL;
-static char *month[] =
-{ "Jan", "Feb", "Mar", "Apr",
-    "May", "Jun", "Jul", "Aug",
-    "Sep", "Oct", "Nov", "Dec" };
+static char *month[] = { "Jan", "Feb", "Mar", "Apr",
+	"May", "Jun", "Jul", "Aug",
+	"Sep", "Oct", "Nov", "Dec"
+};
 
-#define DEVIO
-
-static uint16_t bufclock = 0;		/* Time-stamp counter for LRU */
+static uint16_t bufclock = 0;	/* Time-stamp counter for LRU */
 static struct blkbuf bufpool[NBUFS];
 
 static struct cinode i_tab[ITABSIZE];
 static struct filesys fs_tab[1];
-
-int swizzling = 0;
 
 static inoptr root;
 static struct oft of_tab[OFTSIZE];
@@ -48,659 +47,680 @@ static void usage(void);
 static void prmode(int mode);
 static int cmd_ls(char *path);
 static int cmd_chmod(char *modes, char *path);
-static int cmd_mknod( char *path, char *modes, char *devs);
+static int cmd_mknod(char *path, char *modes, char *devs);
 static int cmd_mkdir(char *path);
-static int cmd_link( char *src, char *dst );
-static int cmd_get( char *src, char *dest, int binflag);
-static int cmd_put( char *arg, int binflag);
-static int cmd_type( char *arg);
+static int cmd_link(char *src, char *dst);
+static int cmd_get(char *src, char *dest, int binflag);
+static int cmd_put(char *arg, int binflag);
+static int cmd_type(char *arg);
 static int cmd_fdump(char *arg);
-static int cmd_rm( char *path);
+static int cmd_rm(char *path);
 static int cmd_rmdir(char *path);
 
 static int interactive = 0;
 
+static void cmdusage(void)
+{
+	fprintf(stderr, "Usage: ucp [-b] FILE [COMMAND]\n");
+	exit(1);
+}
+
 int main(int argc, char *argval[])
 {
-    int  rdev;
-    char cmd[30], arg1[1024], arg2[30], arg3[30];
-    int  count;
-    int  multiline;
-    int  pending_line = 0;
-    struct filesys fsys;
-    int  j, retc = 0;
+	int rdev;
+	char cmd[30], arg1[1024], arg2[30], arg3[30];
+	int count;
+	int multiline;
+	int pending_line = 0;
+	struct filesys fsys;
+	int j, retc = 0;
+	int opt;
 
-    if (argc == 2) {
-        fd_open(argval[1]);
-        multiline = 1;
-    } else if (argc == 3) {
-        fd_open(argval[1]);
-        strncpy(&line[0], argval[2], 127);
-        line[127] = '\0';
-        multiline = 0;
-    } else {
-        printf("Usage: ucp FILE [COMMAND]\n");
-        exit(1);
-    }
+	while ((opt = getopt(argc, argval, "b")) != -1) {
+		switch (opt) {
+		case 'b':
+			swapped = 1;
+			break;
+		default:
+			cmdusage();
+		}
+	}
+	if (optind >= argc)
+		cmdusage();
+	if (argc - optind == 1) {
+		fd_open(argval[optind], 0);
+		multiline = 1;
+	} else if (argc - optind == 2) {
+		fd_open(argval[optind], 0);
+		strncpy(&line[0], argval[optind + 1], 127);
+		line[127] = '\0';
+		multiline = 0;
+	} else {
+		cmdusage();
+	}
 
-    if (isatty(0))
-	interactive = 1;
+	if (isatty(0))
+		interactive = 1;
 
-    rdev = 0;
+	rdev = 0;
 
-    xfs_init(rdev);
-    strcpy(cwd, "/");
+	xfs_init(rdev);
+	strcpy(cwd, "/");
 
-    printf("Fuzix UCP version " UCP_VERSION ".%s\n", interactive?" Type ? for help.":"");
+	printf("Fuzix UCP version " UCP_VERSION ".%s\n",
+	       interactive ? " Type ? for help." : "");
 
-    do {
-        if (multiline && !pending_line) {
-	    if (interactive)
-                printf("unix: ");
-            if (fgets(line, 128, stdin) == NULL) {
-                xfs_end();
-                exit(retc);
-            }
-        }
+	do {
+		if (multiline && !pending_line) {
+			if (interactive)
+				printf("ucp: ");
+			if (fgets(line, 128, stdin) == NULL) {
+				xfs_end();
+				exit(retc);
+			}
+		}
 
-        if (!pending_line) {
-            nextline = strchr(&line[0], ';');
-	    if (nextline != NULL) {
-                nextline[0] = '\0';
-                nextline++;
-            }
-        }
+		if (!pending_line) {
+			nextline = strchr(&line[0], ';');
+			if (nextline != NULL) {
+				nextline[0] = '\0';
+				nextline++;
+			}
+		}
 
-        cmd[0] = '\0';
-        *arg1 = '\0';
-        arg2[0] = '\0';
-        arg3[0] = '\0';
+		cmd[0] = '\0';
+		*arg1 = '\0';
+		arg2[0] = '\0';
+		arg3[0] = '\0';
 
-        if (pending_line) {
-            count = sscanf(nextline, "%s %s %s %s", cmd, arg1, arg2, arg3);
-            nextline = NULL;
-            pending_line = 0;
-            if (count == 0 || cmd[0] == '\0')
-                continue;
-        } else {
-            count = sscanf(line, "%s %s %s %s", cmd, arg1, arg2, arg3);
-            if (nextline != NULL) {
-                pending_line = 1;
-            }
-            if (count == 0 || cmd[0] == '\0')
-                continue;
-        }
+		if (pending_line) {
+			count =
+			    sscanf(nextline, "%s %s %s %s", cmd, arg1,
+				   arg2, arg3);
+			nextline = NULL;
+			pending_line = 0;
+			if (count == 0 || cmd[0] == '\0')
+				continue;
+		} else {
+			count =
+			    sscanf(line, "%s %s %s %s", cmd, arg1, arg2,
+				   arg3);
+			if (nextline != NULL) {
+				pending_line = 1;
+			}
+			if (count == 0 || cmd[0] == '\0')
+				continue;
+		}
 
-        fuzix_sync();
+		fuzix_sync();
 
-        if (strcmp(cmd, "\n") == 0)
-            continue;
-	if (cmd[0] == '#')
-            continue;
-        switch (match(cmd)) {
-            case 0:         /* exit */
-                xfs_end();
-                exit(retc);
+		if (strcmp(cmd, "\n") == 0)
+			continue;
+		if (cmd[0] == '#')
+			continue;
+		switch (match(cmd)) {
+		case 0:	/* exit */
+			xfs_end();
+			exit(retc);
 
-            case 1:         /* ls */
-                if (*arg1)
-                    retc = cmd_ls(arg1);
-                else
-                    retc = cmd_ls(".");
-                break;
+		case 1:	/* ls */
+			if (*arg1)
+				retc = cmd_ls(arg1);
+			else
+				retc = cmd_ls(".");
+			break;
 
-            case 2:         /* cd */
-                if (*arg1) {
-                    strcpy(cwd, arg1);
-                    if ((retc = fuzix_chdir(arg1)) != 0) {
-                        printf("cd: error number %d\n", *syserror);
-                    }
-                }
-                break;
+		case 2:	/* cd */
+			if (*arg1) {
+				strcpy(cwd, arg1);
+				if ((retc = fuzix_chdir(arg1)) != 0) {
+					printf("cd: error number %d\n",
+					       *syserror);
+				}
+			}
+			break;
 
-            case 3:         /* mkdir */
-                if (*arg1)
-                    retc = cmd_mkdir(arg1);
-                break;
+		case 3:	/* mkdir */
+			if (*arg1)
+				retc = cmd_mkdir(arg1);
+			break;
 
-            case 4:         /* mknod */
-                if (*arg1 && *arg2 && *arg3)
-                    retc = cmd_mknod(arg1, arg2, arg3);
-                break;
+		case 4:	/* mknod */
+			if (*arg1 && *arg2 && *arg3)
+				retc = cmd_mknod(arg1, arg2, arg3);
+			break;
 
-            case 5:         /* chmod */
-                if (*arg1 && *arg2)
-                    retc = cmd_chmod(arg1, arg2);
-                break;
+		case 5:	/* chmod */
+			if (*arg1 && *arg2)
+				retc = cmd_chmod(arg1, arg2);
+			break;
 
-            case 6:         /* get */
-                if (*arg1)
-                    retc = cmd_get(arg1, *arg2 ? arg2 : arg1, 0);
-                break;
+		case 6:	/* get */
+			if (*arg1)
+				retc =
+				    cmd_get(arg1, *arg2 ? arg2 : arg1, 0);
+			break;
 
-            case 7:         /* bget */
-                if (*arg1)
-                    retc = cmd_get(arg1, *arg2 ? arg2 : arg1, 1);
-                break;
+		case 7:	/* bget */
+			if (*arg1)
+				retc =
+				    cmd_get(arg1, *arg2 ? arg2 : arg1, 1);
+			break;
 
-            case 8:         /* put */
-                if (*arg1)
-                    retc = cmd_put(arg1, 0);
-                break;
+		case 8:	/* put */
+			if (*arg1)
+				retc = cmd_put(arg1, 0);
+			break;
 
-            case 9:         /* bput */
-                if (*arg1)
-                    retc = cmd_put(arg1, 1);
-                break;
+		case 9:	/* bput */
+			if (*arg1)
+				retc = cmd_put(arg1, 1);
+			break;
 
-            case 10:        /* type */
-                if (*arg1)
-                    retc = cmd_type(arg1);
-                break;
+		case 10:	/* type */
+			if (*arg1)
+				retc = cmd_type(arg1);
+			break;
 
-            case 11:        /* dump */
-                if (*arg1)
-                    retc = cmd_fdump(arg1);
-                break;
+		case 11:	/* dump */
+			if (*arg1)
+				retc = cmd_fdump(arg1);
+			break;
 
-            case 12:        /* rm */
-                if (*arg1)
-                    retc = cmd_rm(arg1);
-                break;
+		case 12:	/* rm */
+			if (*arg1)
+				retc = cmd_rm(arg1);
+			break;
 
-            case 13:        /* df */
-                for (j = 0; j < 4; ++j) {
-                    retc = fuzix_getfsys(j, (char*)&fsys);
-                    if (retc == 0 && fsys.s_mounted) {
-                        printf("%d:  %u blks used, %u free;  ", j,
-                                (fsys.s_fsize - fsys.s_isize) - fsys.s_tfree,
-                                fsys.s_tfree);
-                        printf("%u inodes used, %u free\n",
-                                (8 * (fsys.s_isize - 2) - fsys.s_tinode),
-                                fsys.s_tinode);
-                    }
-                }
-                break;
+		case 13:	/* df */
+			for (j = 0; j < 4; ++j) {
+				retc = fuzix_getfsys(j, (char *) &fsys);
+				if (retc == 0 && fsys.s_mounted) {
+					printf
+					    ("%d:  %u blks used, %u free;  ",
+					     j,
+					     (fsys.s_fsize -
+					      fsys.s_isize) - fsys.s_tfree,
+					     fsys.s_tfree);
+					printf("%u inodes used, %u free\n",
+					       (8 * (fsys.s_isize - 2) -
+						fsys.s_tinode),
+					       fsys.s_tinode);
+				}
+			}
+			break;
 
-            case 14:        /* rmdir */
-                if (*arg1)
-                    retc = cmd_rmdir(arg1);
-                break;
+		case 14:	/* rmdir */
+			if (*arg1)
+				retc = cmd_rmdir(arg1);
+			break;
 
-            case 15:        /* mount */
-                if (*arg1 && *arg2)
-                    if ((retc = fuzix_mount(arg1, arg2, 0)) != 0) {
-                        printf("Mount error: %d\n", *syserror);
-                    }
-                break;
+		case 17:	/* ln */
+			if (*arg1 && *arg2)
+				retc = cmd_link(arg1, arg2);
+			break;
 
-            case 16:        /* umount */
-                if (*arg1)
-                    if ((retc = fuzix_umount(arg1)) != 0) {
-                        printf("Umount error: %d\n", *syserror);
-                    }
-                break;
-	
-	    case 17:        /* ln */
-		if (*arg1 && *arg2)
-		    retc = cmd_link(arg1, arg2);
-		break;
+		case 50:	/* help */
+			usage();
+			retc = 0;
+			break;
 
-            case 50:        /* help */
-                usage();
-                retc = 0;
-                break;
+		default:	/* ..else.. */
+			printf("Unknown command, type ? for help.\n");
+			retc = -1;
+			break;
+		}		/* End Switch */
+	} while (multiline || pending_line);
 
-            default:        /* ..else.. */
-                printf("Unknown command, type ? for help.\n");
-                retc = -1;
-                break;
-        }           /* End Switch */
-    } while (multiline || pending_line);
+	fuzix_sync();
 
-    fuzix_sync();
-
-    return retc;
+	return retc;
 }
 
 
 static int match(char *cmd)
 {
-    if (strcmp(cmd, "exit") == 0)
-        return (0);
-    else if (strcmp(cmd, "quit") == 0)
-        return (0);
-    else if (strcmp(cmd, "ls") == 0)
-        return (1);
-    else if (strcmp(cmd, "dir") == 0)
-        return (1);
-    else if (strcmp(cmd, "cd") == 0)
-        return (2);
-    else if (strcmp(cmd, "mkdir") == 0)
-        return (3);
-    else if (strcmp(cmd, "mknod") == 0)
-        return (4);
-    else if (strcmp(cmd, "chmod") == 0)
-        return (5);
-    else if (strcmp(cmd, "get") == 0)
-        return (6);
-    else if (strcmp(cmd, "bget") == 0)
-        return (7);
-    else if (strcmp(cmd, "put") == 0)
-        return (8);
-    else if (strcmp(cmd, "bput") == 0)
-        return (9);
-    else if (strcmp(cmd, "type") == 0)
-        return (10);
-    else if (strcmp(cmd, "cat") == 0)
-        return (10);
-    else if (strcmp(cmd, "dump") == 0)
-        return (11);
-    else if (strcmp(cmd, "rm") == 0)
-        return (12);
-    else if (strcmp(cmd, "df") == 0)
-        return (13);
-    else if (strcmp(cmd, "rmdir") == 0)
-        return (14);
-    else if (strcmp(cmd, "mount") == 0)
-        return (15);
-    else if (strcmp(cmd, "umount") == 0)
-        return (16);
-    else if (strcmp(cmd, "ln" ) == 0 )
-	return (17);
-    else if (strcmp(cmd, "help") == 0)
-        return (50);
-    else if (strcmp(cmd, "?") == 0)
-        return (50);
-    else
-        return (-1);
+	if (strcmp(cmd, "exit") == 0)
+		return (0);
+	else if (strcmp(cmd, "quit") == 0)
+		return (0);
+	else if (strcmp(cmd, "ls") == 0)
+		return (1);
+	else if (strcmp(cmd, "dir") == 0)
+		return (1);
+	else if (strcmp(cmd, "cd") == 0)
+		return (2);
+	else if (strcmp(cmd, "mkdir") == 0)
+		return (3);
+	else if (strcmp(cmd, "mknod") == 0)
+		return (4);
+	else if (strcmp(cmd, "chmod") == 0)
+		return (5);
+	else if (strcmp(cmd, "get") == 0)
+		return (6);
+	else if (strcmp(cmd, "bget") == 0)
+		return (7);
+	else if (strcmp(cmd, "put") == 0)
+		return (8);
+	else if (strcmp(cmd, "bput") == 0)
+		return (9);
+	else if (strcmp(cmd, "type") == 0)
+		return (10);
+	else if (strcmp(cmd, "cat") == 0)
+		return (10);
+	else if (strcmp(cmd, "dump") == 0)
+		return (11);
+	else if (strcmp(cmd, "rm") == 0)
+		return (12);
+	else if (strcmp(cmd, "df") == 0)
+		return (13);
+	else if (strcmp(cmd, "rmdir") == 0)
+		return (14);
+	else if (strcmp(cmd, "ln") == 0)
+		return (17);
+	else if (strcmp(cmd, "help") == 0)
+		return (50);
+	else if (strcmp(cmd, "?") == 0)
+		return (50);
+	else
+		return (-1);
 }
 
 
 static void usage(void)
 {
-    printf("UCP commands:\n");
-    printf("?|help\n");
-    printf("exit|quit\n");
-    printf("dir|ls [path]\n");
-    printf("cd path\n");
-    printf("mkdir dirname\n");
-    printf("mknod name mode dev#\n");
-    printf("chmod mode path\n");
-    printf("[b]get sourcefile [destfile]\n");
-    printf("[b]put uzifile\n");
-    printf("type|cat filename\n");
-    printf("dump filename\n");
-    printf("rm path\n");
-    printf("rmdir dirname\n");
-    printf("df\n");
-    printf("mount dev# path\n");
-    printf("umount path\n");
-    printf("ln sourcefile destfile\n");
+	printf("UCP commands:\n");
+	printf("?|help\n");
+	printf("exit|quit\n");
+	printf("dir|ls [path]\n");
+	printf("cd path\n");
+	printf("mkdir dirname\n");
+	printf("mknod name mode dev#\n");
+	printf("chmod mode path\n");
+	printf("[b]get sourcefile [destfile]\n");
+	printf("[b]put uzifile\n");
+	printf("type|cat filename\n");
+	printf("dump filename\n");
+	printf("rm path\n");
+	printf("rmdir dirname\n");
+	printf("df\n");
+	printf("ln sourcefile destfile\n");
 }
 
 static void prmode(int mode)
 {
-    if (mode & 4)
-        printf("r");
-    else
-        printf("-");
+	if (mode & 4)
+		printf("r");
+	else
+		printf("-");
 
-    if (mode & 2)
-        printf("w");
-    else
-        printf("-");
+	if (mode & 2)
+		printf("w");
+	else
+		printf("-");
 
-    if (mode & 1)
-        printf("x");
-    else
-        printf("-");
+	if (mode & 1)
+		printf("x");
+	else
+		printf("-");
+}
+
+static void fuzix_ls_out(char *dname)
+{
+	char *p;
+	int st;
+
+	struct uzi_stat statbuf;
+	if (fuzix_stat(dname, &statbuf) != 0) {
+		fprintf(stderr, "ls: can't stat %s\n", dname);
+		return;
+	}
+
+	st = (statbuf.st_mode & F_MASK);
+	if ((st & F_MASK) == F_DIR)	/* & F_MASK is redundant */
+		printf("d");
+	else if ((st & F_MASK) == F_CDEV)
+		printf("c");
+	else if ((st & F_MASK) == F_BDEV)
+		printf("b");
+	else if ((st & F_MASK) == F_PIPE)
+		printf("p");
+	else if ((st & F_REG) == 0)
+		printf("l");
+	else
+		printf("-");
+
+	prmode(statbuf.st_mode >> 6);
+	prmode(statbuf.st_mode >> 3);
+	prmode(statbuf.st_mode);
+	printf("%4d %5d", statbuf.st_nlink, statbuf.st_ino);
+	printf("%12u ", (statbuf.st_mode & F_CDEV) ?
+	       statbuf.st_rdev : statbuf.st_size);
+
+	if (statbuf.fst_mtime == 0) {	/* st_mtime? */
+		printf("                   ");
+	} else {
+		time_t t = statbuf.fst_mtime;
+		struct tm *tm = gmtime(&t);
+		printf("%s %02d %4d   ",
+		       month[tm->tm_mon], tm->tm_mday, tm->tm_year);
+		printf("%2d:%02d", tm->tm_hour, tm->tm_min);
+	}
+	p = strrchr(dname, '/');
+	if (p)
+		dname = p + 1;
+	if ((statbuf.st_mode & F_MASK) == F_DIR)
+		strcat(dname, "/");
+	printf("  %-15s\n", dname);
 }
 
 static int cmd_ls(char *path)
 {
-    struct direct buf;
-    struct uzi_stat statbuf;
-    char dname[128];
-    int d, st;
+	struct direct buf;
+	struct uzi_stat statbuf;
+	char dname[512];
+	int d, st;
 
-    /*
-       if (fuzix_stat(path, &statbuf) != 0 || (statbuf.st_mode & F_MASK) != F_DIR) {
-       printf("ls: can't stat %s\n", path);
-       return -1;
-       }
-       */
+	d = fuzix_open(path, 0);
+	if (d < 0) {
+		fprintf(stderr, "ls: can't open %s\n", path);
+		return -1;
+	}
+	if (fuzix_stat(path, &statbuf) != 0) {
+		fprintf(stderr, "ls: can't stat %s\n", path);
+		return -1;
+	}
+	st = (statbuf.st_mode & F_MASK);
+	if ((st & F_MASK) == F_DIR) {
+		while (fuzix_read(d, (char *) &buf, 16) == 16) {
+			if (buf.d_name[0] == '\0')
+				continue;
 
-    d = fuzix_open(path, 0);
-    if (d < 0) {
-        fprintf(stderr, "ls: can't open %s\n", path);
-        return -1;
-    }
-    while (fuzix_read(d, (char *) &buf, 16) == 16) {
-        if (buf.d_name[0] == '\0')
-            continue;
-
-        if (path[0] != '.' || path[1]) {
-            strcpy(dname, path);
-            strcat(dname, "/");
-        } else {
-            dname[0] = '\0';
-        }
-
-        strcat(dname, buf.d_name);
-
-        if (fuzix_stat(dname, &statbuf) != 0) {
-            fprintf(stderr, "ls: can't stat %s\n", dname);
-            break;
-        }
-        st = (statbuf.st_mode & F_MASK);
-
-        if ((st & F_MASK) == F_DIR) /* & F_MASK is redundant */
-            printf("d");
-        else if ((st & F_MASK) == F_CDEV)
-            printf("c");
-        else if ((st & F_MASK) == F_BDEV)
-            printf("b");
-        else if ((st & F_MASK) == F_PIPE)
-            printf("p");
-        else if ((st & F_REG) == 0)
-            printf("l");
-        else
-            printf("-");
-
-        prmode(statbuf.st_mode >> 6);
-        prmode(statbuf.st_mode >> 3);
-        prmode(statbuf.st_mode);
-
-        printf("%4d %5d", statbuf.st_nlink, statbuf.st_ino);
-
-        if ((statbuf.st_mode & F_MASK) == F_DIR)
-            strcat(dname, "/");
-
-        printf("%12u ",
-                (statbuf.st_mode & F_CDEV) ?
-                statbuf.st_rdev :
-                statbuf.st_size);
-
-        if (statbuf.fst_mtime == 0) { /* st_mtime? */
-            /*printf("--- -- ----   --:--");*/
-            printf("                   ");
-        } else {
-            time_t t = statbuf.fst_mtime;
-            struct tm *tm = gmtime(&t);
-            printf("%s %02d %4d   ",
-                    month[tm->tm_mon],
-                    tm->tm_mday,
-                    tm->tm_year);
-
-            printf("%2d:%02d",
-                    tm->tm_hour,
-                    tm->tm_min);
-        }
-
-        printf("  %-15s\n", dname);
-    }
-    fuzix_close(d);
-    return 0;
+			if (path[0] != '.' || path[1]) {
+				strcpy(dname, path);
+				strcat(dname, "/");
+			} else {
+				dname[0] = '\0';
+			}
+			strcat(dname, buf.d_name);
+			fuzix_ls_out(dname);
+		}
+	} else
+		fuzix_ls_out(path);
+	fuzix_close(d);
+	return 0;
 }
 
 static int cmd_chmod(char *modes, char *path)
 {
-    unsigned int mode;
+	unsigned int mode;
 
-    if (interactive)
-        printf("chmod %s to %s\n", path, modes);
-    if (sscanf(modes, "%o", &mode) != 1) {
-        fprintf(stderr, "chmod: bad mode\n");
-        return (-1);
-    }
-    /* Preserve the type if not specified */
-    if (mode < 10000) {
-        struct uzi_stat st;
-        if (fuzix_stat(path, &st) != 0) {
-            fprintf(stderr, "chmod: can't stat file '%s': %d\n", path, *syserror);
-            return -1;
-        }
-        mode = (st.st_mode & ~0x7777) | mode;
-    }
-    if (fuzix_chmod(path, mode)) {
-        fprintf(stderr, "chmod: error %d\n", *syserror);
-        return (-1);
-    }
-    return 0;
+	if (interactive)
+		printf("chmod %s to %s\n", path, modes);
+	if (sscanf(modes, "%o", &mode) != 1) {
+		fprintf(stderr, "chmod: bad mode\n");
+		return (-1);
+	}
+	/* Preserve the type if not specified */
+	if (mode < 010000) {
+		struct uzi_stat st;
+		if (fuzix_stat(path, &st) != 0) {
+			fprintf(stderr,
+				"chmod: can't stat file '%s': %d\n", path,
+				*syserror);
+			return -1;
+		}
+		mode = (st.st_mode & ~0x7777) | mode;
+	}
+	if (fuzix_chmod(path, mode)) {
+		fprintf(stderr, "chmod: error %d\n", *syserror);
+		return (-1);
+	}
+	return 0;
 }
 
 
-static int cmd_mknod( char *path, char *modes, char *devs)
+static int cmd_mknod(char *path, char *modes, char *devs)
 {
-    unsigned int mode;
-    int dev;
+	unsigned int mode;
+	int dev;
 
-    if (sscanf(modes, "%o", &mode) != 1) {
-        fprintf(stderr, "mknod: bad mode\n");
-        return (-1);
-    }
-    if ((mode & F_MASK) != F_BDEV && (mode & F_MASK) != F_CDEV) {
-        fprintf(stderr, "mknod: mode is not device\n");
-        return (-1);
-    }
-    dev = -1;
-    sscanf(devs, "%d", &dev);
-    if (dev == -1) {
-        fprintf(stderr, "mknod: bad device\n");
-        return (-1);
-    }
-    if (fuzix_mknod(path, mode, dev) != 0) {
-        fprintf(stderr, "fuzix_mknod: error %d\n", *syserror);
-        return (-1);
-    }
-    return (0);
+	if (sscanf(modes, "%o", &mode) != 1) {
+		fprintf(stderr, "mknod: bad mode\n");
+		return (-1);
+	}
+	if ((mode & F_MASK) != F_BDEV && (mode & F_MASK) != F_CDEV) {
+		fprintf(stderr, "mknod: mode is not device\n");
+		return (-1);
+	}
+	dev = -1;
+	sscanf(devs, "%d", &dev);
+	if (dev == -1) {
+		fprintf(stderr, "mknod: bad device\n");
+		return (-1);
+	}
+	if (fuzix_mknod(path, mode, dev) != 0) {
+		fprintf(stderr, "fuzix_mknod: error %d\n", *syserror);
+		return (-1);
+	}
+	return (0);
 }
 
 
 
 static int cmd_mkdir(char *path)
 {
-    if (fuzix_mkdir(path, 0777) != 0) {
-        fprintf(stderr, "mkdir: mknod error %d\n", *syserror);
-        return (-1);
-    }
-    return (0);
+	if (fuzix_mkdir(path, 0777) != 0) {
+		fprintf(stderr, "mkdir: mknod error %d\n", *syserror);
+		return (-1);
+	}
+	return (0);
 }
 
-static int cmd_link( char *src, char *dst )
+static int cmd_link(char *src, char *dst)
 {
-    if( fuzix_link( src, dst ) != 0 ){
-	fprintf(stderr, "link: error %d\n", *syserror );
-	return -1;
-    }
-    return 0;
+	if (fuzix_link(src, dst) != 0) {
+		fprintf(stderr, "link: error %d\n", *syserror);
+		return -1;
+	}
+	return 0;
 }
 
-static int cmd_get( char *src, char *dest, int binflag)
+static int cmd_get(char *src, char *dest, int binflag)
 {
-    FILE *fp;
-    int d;
-    char cbuf[512];
-    int nread;
+	FILE *fp;
+	int d;
+	char cbuf[512];
+	int nread;
 
-    fp = fopen(src, binflag ? "rb" : "r");
-    if (fp == NULL) {
-        fprintf(stderr, "Source file '%s' not found\n", src);
-        return (-1);
-    }
-    d = fuzix_creat(basename(dest), 0666);
-    if (d < 0) {
-        fprintf(stderr, "Can't open destination file '%s'; error %d\n", dest, *syserror);
-        return (-1);
-    }
-    for (;;) {
-        nread = fread(cbuf, 1, 512, fp);
-        if (nread == 0)
-            break;
-        if (fuzix_write(d, cbuf, nread) != nread) {
-            fprintf(stderr, "fuzix_write error %d\n", *syserror);
-            fclose(fp);
-            fuzix_close(d);
-            return (-1);
-        }
-    }
-    fclose(fp);
-    fuzix_close(d);
-    fuzix_sync();
-    return (0);
-}
-
-
-static int cmd_put( char *arg, int binflag)
-{
-    FILE *fp;
-    int d;
-    char cbuf[512];
-    int nread;
-
-    fp = fopen(arg, binflag ? "wb" : "w");
-    if (fp == NULL) {
-        fprintf(stderr, "Can't open destination file.\n");
-        return (-1);
-    }
-    d = fuzix_open(arg, 0);
-    if (d < 0) {
-        fprintf(stderr, "Can't open unix file error %d\n", *syserror);
-        return (-1);
-    }
-    for (;;) {
-        if ((nread = fuzix_read(d, cbuf, 512)) == 0)
-            break;
-        if (fwrite(cbuf, 1, nread, fp) != nread) {
-            fprintf(stderr, "fwrite error");
-            fclose(fp);
-            fuzix_close(d);
-            return (-1);
-        }
-    }
-    fclose(fp);
-    fuzix_close(d);
-    return (0);
+	fp = fopen(src, binflag ? "rb" : "r");
+	if (fp == NULL) {
+		fprintf(stderr, "Source file '%s' not found\n", src);
+		return (-1);
+	}
+	d = fuzix_creat(basename(dest), 0666);
+	if (d < 0) {
+		fprintf(stderr,
+			"Can't open destination file '%s'; error %d\n",
+			dest, *syserror);
+		fclose(fp);
+		return (-1);
+	}
+	for (;;) {
+		nread = fread(cbuf, 1, 512, fp);
+		if (nread == 0)
+			break;
+		if (fuzix_write(d, cbuf, nread)) {
+			fprintf(stderr, "fuzix_write error %d\n",
+				*syserror);
+			fclose(fp);
+			fuzix_close(d);
+			return (-1);
+		}
+	}
+	fclose(fp);
+	fuzix_close(d);
+	fuzix_sync();
+	return (0);
 }
 
 
-static int cmd_type( char *arg)
+static int cmd_put(char *arg, int binflag)
 {
-    int d, i;
-    char cbuf[512];
-    int nread;
+	FILE *fp;
+	int d;
+	char cbuf[512];
+	int nread;
 
-    d = fuzix_open(arg, 0);
-    if (d < 0) {
-        fprintf(stderr, "Can't open unix file error %d\n", *syserror);
-        return (-1);
-    }
-    for (;;) {
-        if ((nread = fuzix_read(d, cbuf, 512)) == 0)
-            break;
+	fp = fopen(arg, binflag ? "wb" : "w");
+	if (fp == NULL) {
+		fprintf(stderr, "Can't open destination file.\n");
+		return (-1);
+	}
+	d = fuzix_open(arg, 0);
+	if (d < 0) {
+		fprintf(stderr, "Can't open unix file error %d\n",
+			*syserror);
+		return (-1);
+	}
+	for (;;) {
+		if ((nread = fuzix_read(d, cbuf, 512)) == 0)
+			break;
+		if (fwrite(cbuf, 1, nread, fp) != nread) {
+			fprintf(stderr, "fwrite error");
+			fclose(fp);
+			fuzix_close(d);
+			return (-1);
+		}
+	}
+	fclose(fp);
+	fuzix_close(d);
+	return (0);
+}
 
-        for (i = 0; i < nread; i++) {
-            if (cbuf[i] == 0x1a)
-                break;
-            fputc(cbuf[i], stdout);
-        }
-    }
-    fputc('\n', stdout);
-    fuzix_close(d);
-    return (0);
+
+static int cmd_type(char *arg)
+{
+	int d, i;
+	char cbuf[512];
+	int nread;
+
+	d = fuzix_open(arg, 0);
+	if (d < 0) {
+		fprintf(stderr, "Can't open unix file error %d\n",
+			*syserror);
+		return (-1);
+	}
+	for (;;) {
+		if ((nread = fuzix_read(d, cbuf, 512)) == 0)
+			break;
+
+		for (i = 0; i < nread; i++) {
+			if (cbuf[i] == 0x1a)
+				break;
+			fputc(cbuf[i], stdout);
+		}
+	}
+	fputc('\n', stdout);
+	fuzix_close(d);
+	return (0);
 }
 
 
 static int cmd_fdump(char *arg)
 {
-    int d;
-    char cbuf[512];
-    int nread;
+	int d;
+	char cbuf[512];
+	int nread;
 
-    printf("Dump starting.\n");
-    d = fuzix_open(arg, 0);
-    if (d < 0) {
-        fprintf(stderr, "Can't open unix file error %d\n", *syserror);
-        return (-1);
-    }
-    for (;;) {
-        if ((nread = fuzix_read(d, cbuf, 512)) == 0)
-            break;
-    }
-    fuzix_close(d);
-    printf("Dump done.\n");
-    return (0);
+	printf("Dump starting.\n");
+	d = fuzix_open(arg, 0);
+	if (d < 0) {
+		fprintf(stderr, "Can't open unix file error %d\n",
+			*syserror);
+		return (-1);
+	}
+	for (;;) {
+		if ((nread = fuzix_read(d, cbuf, 512)) == 0)
+			break;
+	}
+	fuzix_close(d);
+	printf("Dump done.\n");
+	return (0);
 }
 
 
-static int cmd_rm( char *path)
+static int cmd_rm(char *path)
 {
-    struct uzi_stat statbuf;
+	struct uzi_stat statbuf;
 
-    if (fuzix_stat(path, &statbuf) != 0) {
-        fprintf(stderr, "unlink: can't stat %s\n", path);
-        return (-1);
-    }
-    if ((statbuf.st_mode & F_MASK) == F_DIR) {
-        fprintf(stderr, "unlink: %s is a directory\n", path);
-        return (-1);
-    }
-    if (fuzix_unlink(path) != 0) {
-        fprintf(stderr, "unlink: fuzix_unlink errn=or %d\n", *syserror);
-        return (-1);
-    }
-    return (0);
+	if (fuzix_stat(path, &statbuf) != 0) {
+		fprintf(stderr, "unlink: can't stat %s\n", path);
+		return (-1);
+	}
+	if ((statbuf.st_mode & F_MASK) == F_DIR) {
+		fprintf(stderr, "unlink: %s is a directory\n", path);
+		return (-1);
+	}
+	if (fuzix_unlink(path) != 0) {
+		fprintf(stderr, "unlink: fuzix_unlink errn=or %d\n",
+			*syserror);
+		return (-1);
+	}
+	return (0);
 }
 
 
 static int cmd_rmdir(char *path)
 {
-    struct uzi_stat statbuf;
-    char newpath[100];
-    struct direct dir;
-    int fd;
+	struct uzi_stat statbuf;
+	char newpath[100];
+	struct direct dir;
+	int fd;
 
-    if (fuzix_stat(path, &statbuf) != 0) {
-        fprintf(stderr, "rmdir: can't stat %s\n", path);
-        return (-1);
-    }
-    if ((statbuf.st_mode & F_DIR) == 0) {
-        /*-- Constant expression !!!  HFB --*/
-        fprintf(stderr, "rmdir: %s is not a directory\n", path);
-        return (-1);
-    }
-    if ((fd = fuzix_open(path, 0)) < 0) {
-        fprintf(stderr, "rmdir: %s is unreadable\n", path);
-        return (-1);
-    }
-    while (fuzix_read(fd, (char *) &dir, sizeof(dir)) == sizeof(dir)) {
-        if (dir.d_ino == 0)
-            continue;
-        if (!strcmp(dir.d_name, ".") || !strcmp(dir.d_name, ".."))
-            continue;
-        fprintf(stderr, "rmdir: %s is not empty\n", path);
-        fuzix_close(fd);
-        return (-1);
-    }
-    fuzix_close(fd);
+	if (fuzix_stat(path, &statbuf) != 0) {
+		fprintf(stderr, "rmdir: can't stat %s\n", path);
+		return (-1);
+	}
+	if ((statbuf.st_mode & F_DIR) == 0) {
+	/*-- Constant expression !!!  HFB --*/
+		fprintf(stderr, "rmdir: %s is not a directory\n", path);
+		return (-1);
+	}
+	if ((fd = fuzix_open(path, 0)) < 0) {
+		fprintf(stderr, "rmdir: %s is unreadable\n", path);
+		return (-1);
+	}
+	while (fuzix_read(fd, (char *) &dir, sizeof(dir)) == sizeof(dir)) {
+		if (dir.d_ino == 0)
+			continue;
+		if (!strcmp(dir.d_name, ".") || !strcmp(dir.d_name, ".."))
+			continue;
+		fprintf(stderr, "rmdir: %s is not empty\n", path);
+		fuzix_close(fd);
+		return (-1);
+	}
+	fuzix_close(fd);
 
-    strcpy(newpath, path);
-    strcat(newpath, "/.");
-    if (fuzix_unlink(newpath) != 0) {
-        fprintf(stderr, "rmdir: can't unlink \".\"  error %d\n", *syserror);
-        /*return (-1); */
-    }
-    strcat(newpath, ".");
-    if (fuzix_unlink(newpath) != 0) {
-        fprintf(stderr, "rmdir: can't unlink \"..\"  error %d\n", *syserror);
-        /*return (-1); */
-    }
-    if (fuzix_unlink(path) != 0) {
-        fprintf(stderr, "rmdir: fuzix_unlink error %d\n", *syserror);
-        return (-1);
-    }
-    return (0);
+	strcpy(newpath, path);
+	strcat(newpath, "/.");
+	if (fuzix_unlink(newpath) != 0) {
+		fprintf(stderr, "rmdir: can't unlink \".\"  error %d\n",
+			*syserror);
+		/*return (-1); */
+	}
+	strcat(newpath, ".");
+	if (fuzix_unlink(newpath) != 0) {
+		fprintf(stderr, "rmdir: can't unlink \"..\"  error %d\n",
+			*syserror);
+		/*return (-1); */
+	}
+	if (fuzix_unlink(path) != 0) {
+		fprintf(stderr, "rmdir: fuzix_unlink error %d\n",
+			*syserror);
+		return (-1);
+	}
+	return (0);
 }
 
 static void fs_init(void)
@@ -771,8 +791,7 @@ static int fuzix_open(char *name, int16_t flag)
 		goto cantopen;
 	}
 
-	if (isdevice(ino))	/* && d_open((int)ino->c_node.i_addr[0]) != 0) */
-	{
+	if (isdevice(ino)) {	/* && d_open((int)ino->c_node.i_addr[0]) != 0) */
 		udata.u_error = ENXIO;
 		goto cantopen;
 	}
@@ -803,8 +822,9 @@ static int doclose(int16_t uindex)
 
 #if 0
 	if (isdevice(ino)
-	    /* && ino->c_refs == 1 && of_tab[oftindex].o_refs == 1 */ )
-	    d_close((int)(ino->c_node.i_addr[0]));
+	    /* && ino->c_refs == 1 && of_tab[oftindex].o_refs == 1 */
+	    )
+		d_close((int) (ino->c_node.i_addr[0]));
 #endif
 
 	udata.u_files[uindex] = -1;
@@ -863,8 +883,6 @@ static int fuzix_creat(char *name, int16_t mode)
 			wr_inode(ino);
 		} else {
 			/* Doesn't exist and can't make it */
-			if (parent)
-				i_deref(parent);
 			goto nogood;
 		}
 	}
@@ -963,34 +981,35 @@ static int fuzix_unlink(char *path)
 	return (-1);
 }
 
-static int fuzix_read(int16_t d, char *buf, uint16_t nbytes)
+static uint16_t fuzix_read(int16_t d, char *buf, uint16_t nbytes)
 {
 	register inoptr ino;
+	uint16_t r;
 
 	udata.u_error = 0;
 	/* Set up u_base, u_offset, ino; check permissions, file num. */
 	if ((ino = rwsetup(1, d, buf, nbytes)) == NULLINODE)
 		return (-1);	/* bomb out if error */
 
-	readi(ino);
+	r = readi(ino);
 	updoff(d);
-
-	return (udata.u_count);
+	return r;
 }
 
-static int fuzix_write(int16_t d, char *buf, uint16_t nbytes)
+static uint16_t fuzix_write(int16_t d, char *buf, uint16_t nbytes)
 {
 	register inoptr ino;
+	uint16_t r;
 
 	udata.u_error = 0;
 	/* Set up u_base, u_offset, ino; check permissions, file num. */
 	if ((ino = rwsetup(0, d, buf, nbytes)) == NULLINODE)
 		return (-1);	/* bomb out if error */
 
-	writei(ino);
+	r = writei(ino);
 	updoff(d);
 
-	return (udata.u_count);
+	return r;
 }
 
 static inoptr rwsetup(int rwflag, int d, char *buf, int nbytes)
@@ -1018,15 +1037,13 @@ static inoptr rwsetup(int rwflag, int d, char *buf, int nbytes)
 	return (ino);
 }
 
-static void readi(inoptr ino)
+static uint16_t readi(inoptr ino)
 {
 	register uint16_t amount;
 	register uint16_t toread;
 	register blkno_t pblk;
-	register char *bp;
-	int dev;
+	register uint8_t *bp;
 
-	dev = ino->c_dev;
 	switch (fuzix_getmode(ino)) {
 
 	case F_DIR:
@@ -1036,60 +1053,47 @@ static void readi(inoptr ino)
 		toread = udata.u_count =
 		    min(udata.u_count,
 			swizzle32(ino->c_node.i_size) - udata.u_offset);
-		goto loop;
-
-	case F_BDEV:
-		toread = udata.u_count;
-		dev = swizzle16(*(ino->c_node.i_addr));
-
-	      loop:
 		while (toread) {
 			if ((pblk =
 			     bmap(ino, udata.u_offset >> 9, 1)) != NULLBLK)
-				bp = bread(dev, pblk, 0);
+				bp = bread(0, pblk, 0);
 			else
 				bp = zerobuf();
 
-			bcopy(bp + (udata.u_offset & 511), udata.u_base,
-			      (amount =
-			       min(toread, 512 - (udata.u_offset & 511))));
+			memcpy(udata.u_base, bp + (udata.u_offset & 511),
+			       (amount =
+				min(toread,
+				    512 - (udata.u_offset & 511))));
 			brelse((bufptr) bp);
 
 			udata.u_base += amount;
 			udata.u_offset += amount;
 			toread -= amount;
 		}
-		break;
+		return udata.u_count - toread;
 
 	default:
 		udata.u_error = ENODEV;
 	}
+	return 0;
 }
 
 
 
 /* Writei (and readi) need more i/o error handling */
 
-static void writei(inoptr ino)
+static uint16_t writei(inoptr ino)
 {
 	register uint16_t amount;
 	register uint16_t towrite;
-	register char *bp;
+	register uint8_t *bp;
 	blkno_t pblk;
-	int dev;
-
-	dev = ino->c_dev;
 
 	switch (fuzix_getmode(ino)) {
 
-	case F_BDEV:
-		dev = swizzle16(*(ino->c_node.i_addr));
 	case F_DIR:
 	case F_REG:
 		towrite = udata.u_count;
-		goto loop;
-
-	      loop:
 		while (towrite) {
 			amount =
 			    min(towrite, 512 - (udata.u_offset & 511));
@@ -1100,10 +1104,10 @@ static void writei(inoptr ino)
 
 			/* If we are writing an entire block, we don't care
 			   about its previous contents */
-			bp = bread(dev, pblk, (amount == 512));
+			bp = bread(0, pblk, (amount == 512));
 
-			bcopy(udata.u_base, bp + (udata.u_offset & 511),
-			      amount);
+			memcpy(bp + (udata.u_offset & 511), udata.u_base,
+			       amount);
 			bawrite((bufptr) bp);
 
 			udata.u_base += amount;
@@ -1116,11 +1120,12 @@ static void writei(inoptr ino)
 			ino->c_node.i_size = swizzle32(udata.u_offset);
 			ino->c_dirty = 1;
 		}
-		break;
+		return towrite;
 
 	default:
 		udata.u_error = ENODEV;
 	}
+	return udata.u_count;
 }
 
 
@@ -1177,7 +1182,7 @@ static void fuzix_sync(void)
 {
 	int j;
 	inoptr ino;
-	char *buf;
+	uint8_t *buf;
 
 	/* Write out modified inodes */
 
@@ -1196,7 +1201,8 @@ static void fuzix_sync(void)
 		    && fs_tab[j].s_fmod) {
 			fs_tab[j].s_fmod = 0;
 			buf = bread(j, 1, 1);
-			bcopy((char *) &fs_tab[j], buf, 512);
+			memcpy(buf, (char *) &fs_tab[j],
+			       sizeof(struct filesys));
 			bfree((bufptr) buf, 2);
 		}
 	}
@@ -1290,97 +1296,9 @@ static int fuzix_getfsys(int dev, char *buf)
 		return (-1);
 	}
 
-	/* FIXME: endiam swapping here */
-	bcopy((char *) &fs_tab[dev], (char *) buf, sizeof(struct filesys));
+	/* FIXME: endian swapping here */
+	memcpy(buf, &fs_tab[dev], sizeof(struct filesys));
 	return (0);
-}
-
-static int fuzix_mount(char *spec, char *dir, int rwflag)
-{
-	register inoptr sino, dino;
-	register int dev;
-
-	udata.u_error = 0;
-	ifnot(sino = n_open(spec, NULLINOPTR))
-	    return (-1);
-
-	ifnot(dino = n_open(dir, NULLINOPTR)) {
-		i_deref(sino);
-		return (-1);
-	}
-	if (fuzix_getmode(sino) != F_BDEV) {
-		udata.u_error = ENOTBLK;
-		goto nogood;
-	}
-	if (fuzix_getmode(dino) != F_DIR) {
-		udata.u_error = ENOTDIR;
-		goto nogood;
-	}
-	dev = (int) swizzle16(sino->c_node.i_addr[0]);
-
-	if (dev >= NDEVS)	/* || d_open(dev)) */
-	{
-		udata.u_error = ENXIO;
-		goto nogood;
-	}
-	if (fs_tab[dev].s_mounted || dino->c_refs != 1
-	    || dino->c_num == ROOTINODE) {
-		udata.u_error = EBUSY;
-		goto nogood;
-	}
-	fuzix_sync();
-
-	if (fmount(dev, dino)) {
-		udata.u_error = EBUSY;
-		goto nogood;
-	}
-	i_deref(dino);
-	i_deref(sino);
-	return (0);
-      nogood:
-	i_deref(dino);
-	i_deref(sino);
-	return (-1);
-}
-
-static int fuzix_umount(char *spec)
-{
-	register inoptr sino;
-	register int dev;
-	register inoptr ptr;
-
-	udata.u_error = 0;
-
-	ifnot(sino = n_open(spec, NULLINOPTR))
-	    return (-1);
-
-	if (fuzix_getmode(sino) != F_BDEV) {
-		udata.u_error = ENOTBLK;
-		goto nogood;
-	}
-
-	dev = (int) swizzle16(sino->c_node.i_addr[0]);
-
-	if (!fs_tab[dev].s_mounted) {
-		udata.u_error = EINVAL;
-		goto nogood;
-	}
-
-	for (ptr = i_tab; ptr < i_tab + ITABSIZE; ++ptr)
-		if (ptr->c_refs > 0 && ptr->c_dev == dev) {
-			udata.u_error = EBUSY;
-			goto nogood;
-		}
-	fuzix_sync();
-	fs_tab[dev].s_mounted = 0;
-	i_deref(fs_tab[dev].s_mntpt);
-
-	i_deref(sino);
-	return (0);
-
-      nogood:
-	i_deref(sino);
-	return (-1);
 }
 
 static int fuzix_mkdir(char *name, int mode)
@@ -1423,7 +1341,8 @@ static int fuzix_mkdir(char *name, int mode)
 	ino->c_node.i_nlink = swizzle16(2);
 	parent->c_node.i_nlink =
 	    swizzle16(swizzle16(parent->c_node.i_nlink) + 1);
-	ino->c_node.i_mode = swizzle16(((mode & ~udata.u_mask) & MODE_MASK) | F_DIR);
+	ino->c_node.i_mode =
+	    swizzle16(((mode & ~udata.u_mask) & MODE_MASK) | F_DIR);
 	i_deref(parent);
 	wr_inode(ino);
 	i_deref(ino);
@@ -1447,7 +1366,6 @@ static inoptr n_open(register char *name, register inoptr * parent)
 {
 	register inoptr wd;	/* the directory we are currently searching. */
 	register inoptr ninode;
-	register inoptr temp;
 
 	if (*name == '/')
 		wd = root;
@@ -1480,15 +1398,6 @@ static inoptr n_open(register char *name, register inoptr * parent)
 			goto nodir;
 		}
 
-		/* See if we are going up through a mount point */
-		if (wd->c_num == ROOTINODE && wd->c_dev != ROOTDEV
-		    && name[1] == '.') {
-			temp = fs_tab[wd->c_dev].s_mntpt;
-			++temp->c_refs;
-			i_deref(wd);
-			wd = temp;
-		}
-
 		ninode = srch_dir(wd, name);
 
 		while (*name != '/' && *name)
@@ -1503,7 +1412,7 @@ static inoptr n_open(register char *name, register inoptr * parent)
 	    udata.u_error = ENOENT;
 	return (ninode);
 
-nodir:
+      nodir:
 	if (parent)
 		*parent = NULLINODE;
 	i_deref(wd);
@@ -1597,7 +1506,8 @@ static inoptr i_open(register int dev, register unsigned ino)
 		}
 	}
 
-	if (ino < ROOTINODE || ino >= (swizzle16(fs_tab[dev].s_isize) - 2) * 8) {
+	if (ino < ROOTINODE
+	    || ino >= (swizzle16(fs_tab[dev].s_isize) - 2) * 8) {
 		printf("i_open: bad inode number\n");
 		return (NULLINODE);
 	}
@@ -1627,14 +1537,14 @@ static inoptr i_open(register int dev, register unsigned ino)
 	}
 
 	buf = (struct dinode *) bread(dev, (ino >> 3) + 2, 0);
-	bcopy((char *) &(buf[ino & 0x07]), (char *) &(nindex->c_node), 64);
+	memcpy(&(nindex->c_node), &(buf[ino & 0x07]), 64);
 	brelse((bufptr) buf);
 
 	nindex->c_dev = dev;
 	nindex->c_num = ino;
 	nindex->c_magic = CMAGIC;
 
-found:
+      found:
 	if (new) {
 		if (nindex->c_node.i_nlink
 		    || swizzle16(nindex->c_node.i_mode) & F_MASK)
@@ -1648,7 +1558,7 @@ found:
 	++nindex->c_refs;
 	return (nindex);
 
-badino:
+      badino:
 	printf("i_open: bad disk inode\n");
 	return (NULLINODE);
 }
@@ -1675,7 +1585,6 @@ static int ch_link(inoptr wd, char *oldname, char *newname, inoptr nindex)
 	for (;;) {
 		udata.u_count = 32;
 		udata.u_base = (char *) &curentry;
-/*        udata.u_sysio = 1;                                    280*/
 		readi(wd);
 
 		/* Read until EOF or name is found */
@@ -1688,7 +1597,7 @@ static int ch_link(inoptr wd, char *oldname, char *newname, inoptr nindex)
 	if (udata.u_count == 0 && *oldname)
 		return (0);	/* Entry not found */
 
-	bcopy(newname, curentry.d_name, 30);
+	memcpy(curentry.d_name, newname, 30);
 
 	{
 		int i;
@@ -1712,18 +1621,17 @@ static int ch_link(inoptr wd, char *oldname, char *newname, inoptr nindex)
 	udata.u_count = 32;
 	udata.u_base = (char *) &curentry;
 	udata.u_sysio = 1;	/*280 */
-	writei(wd);
+	if (writei(wd))
+		return 0;
 
-	if (udata.u_error)
-		return (0);
 
 	setftime(wd, A_TIME | M_TIME | C_TIME);	/* Sets c_dirty */
 
 	/* Update file length to next block */
 	if (swizzle32(wd->c_node.i_size) & 511)
-		wd->c_node.i_size = swizzle32(
-		    swizzle32(wd->c_node.i_size) + 512 -
-		    (swizzle32(wd->c_node.i_size) & 511));
+		wd->c_node.i_size =
+		    swizzle32(swizzle32(wd->c_node.i_size) + 512 -
+			      (swizzle32(wd->c_node.i_size) & 511));
 
 	return (1);
 }
@@ -1813,7 +1721,7 @@ static inoptr newfile(inoptr pino, char *name)
 	i_deref(pino);
 	return (nindex);
 
-nogood:
+      nogood:
 	i_deref(pino);
 	return (NULLINODE);
 }
@@ -1985,7 +1893,7 @@ static blkno_t blk_alloc(int devno)
 
 	/* Zero out the new block */
 	buf = (blkno_t *) bread(devno, newno, 2);
-	bzero(buf, 512);
+	memset(buf, 0, 512);
 	bawrite((bufptr) buf);
 	return (newno);
 
@@ -2004,7 +1912,7 @@ and frees the block. */
 static void blk_free(int devno, blkno_t blk)
 {
 	register fsptr dev;
-	register char *buf;
+	register uint8_t *buf;
 	int b;
 
 	ifnot(blk)
@@ -2015,9 +1923,10 @@ static void blk_free(int devno, blkno_t blk)
 
 	validblk(devno, blk);
 
-	if (dev->s_nfree == swizzle16(50) ) {
+	if (dev->s_nfree == swizzle16(50)) {
 		buf = bread(devno, blk, 1);
-		bcopy((char *) &(dev->s_nfree), buf, 512);
+		/* 50 entries in s_free + s_nfree */
+		memcpy(buf, &(dev->s_nfree), 52 * sizeof(uint16_t));
 		bawrite((bufptr) buf);
 		dev->s_nfree = 0;
 	}
@@ -2141,8 +2050,7 @@ static void wr_inode(inoptr ino)
 
 	blkno = (ino->c_num >> 3) + 2;
 	buf = (struct dinode *) bread(ino->c_dev, blkno, 0);
-	bcopy((char *) (&ino->c_node),
-	      (char *) ((char **) &buf[ino->c_num & 0x07]), 64);
+	memcpy(&buf[ino->c_num & 0x07], &ino->c_node, 64);
 	bfree((bufptr) buf, 2);
 	ino->c_dirty = 0;
 }
@@ -2176,7 +2084,7 @@ static void f_trunc(inoptr ino)
 	for (j = 17; j >= 0; --j)
 		freeblk(dev, swizzle16(ino->c_node.i_addr[j]), 0);
 
-	bzero((char *) ino->c_node.i_addr, sizeof(ino->c_node.i_addr));
+	memset((char *) ino->c_node.i_addr, 0, sizeof(ino->c_node.i_addr));
 
 	ino->c_dirty = 1;
 	ino->c_node.i_size = 0;
@@ -2363,13 +2271,13 @@ static int fuzix_getmode(inoptr ino)
  */
 static int fmount(int dev, inoptr ino)
 {
-	char *buf;
+	uint8_t *buf;
 	register struct filesys *fp;
 
 	/* Dev 0 blk 1 */
 	fp = fs_tab + dev;
 	buf = bread(dev, 1, 0);
-	bcopy(buf, (char *) fp, sizeof(struct filesys));
+	memcpy(fp, buf, sizeof(struct filesys));
 	brelse((bufptr) buf);
 
 	/* See if there really is a filesystem on the device */
@@ -2392,7 +2300,7 @@ static void magic(inoptr ino)
 		panic("Corrupt inode");
 }
 
-static char *bread(int dev, blkno_t blk, int rewrite)
+static uint8_t *bread(int dev, blkno_t blk, int rewrite)
 {
 	register bufptr bp;
 
@@ -2412,12 +2320,12 @@ static char *bread(int dev, blkno_t blk, int rewrite)
 	   so we don't need the previous contents */
 
 	ifnot(rewrite)
-	    if (bdread(bp) == -1) {
+	    if (bdread(bp->bf_blk, bp->bf_data) == -1) {
 		udata.u_error = EIO;
 		return 0;
 	}
 
-done:
+      done:
 	bp->bf_busy = 1;
 	bp->bf_time = ++bufclock;	/* Time stamp it */
 	return (bp->bf_data);
@@ -2443,7 +2351,7 @@ static int bfree(bufptr bp, int dirty)
 	bp->bf_busy = 0;
 
 	if (dirty == 2) {	/* Extra dirty */
-		if (bdwrite(bp) == -1)
+		if (bdwrite(bp->bf_blk, bp->bf_data) == -1)
 			udata.u_error = EIO;
 		bp->bf_dirty = 0;
 		return (-1);
@@ -2456,12 +2364,12 @@ static int bfree(bufptr bp, int dirty)
  * garbage contents.  It is essentially a malloc for the kernel.
  * Free it with brelse()!
  */
-static char *tmpbuf(void)
+static uint8_t *tmpbuf(void)
 {
 	bufptr bp;
 	bufptr freebuf();
 
-/*printf("Allocating temp block\n");*/
+	/*printf("Allocating temp block\n"); */
 	bp = freebuf();
 	bp->bf_dev = -1;
 	bp->bf_busy = 1;
@@ -2470,13 +2378,10 @@ static char *tmpbuf(void)
 }
 
 
-static char *zerobuf(void)
+static uint8_t *zerobuf(void)
 {
-	char *b;
-	char *tmpbuf();
-
-	b = tmpbuf();
-	bzero(b, 512);
+	uint8_t *b = tmpbuf();
+	memset(b, 0, 512);
 	return (b);
 }
 
@@ -2487,7 +2392,7 @@ static void bufsync(void)
 
 	for (bp = bufpool; bp < bufpool + NBUFS; ++bp) {
 		if (bp->bf_dev != -1 && bp->bf_dirty) {
-			bdwrite(bp);
+			bdwrite(bp->bf_blk, bp->bf_data);
 			if (!bp->bf_busy)
 				bp->bf_dirty = 0;
 		}
@@ -2525,7 +2430,7 @@ static bufptr freebuf(void)
 	    panic("no free buffers");
 
 	if (oldest->bf_dirty) {
-		if (bdwrite(oldest) == -1)
+		if (bdwrite(oldest->bf_blk, oldest->bf_data) == -1)
 			udata.u_error = EIO;
 		oldest->bf_dirty = 0;
 	}
@@ -2542,39 +2447,3 @@ static void bufinit(void)
 }
 
 
-/*********************************************************************
-Bdread() and bdwrite() are the block device interface routines.  they
-are given a buffer pointer, which contains the device, block number,
-and data location.  They basically validate the device and vector the
-call.
-
-Cdread() and cdwrite are the same for character (or "raw") devices,
-and are handed a device number.  Udata.u_base, count, and offset have
-the rest of the data.
-**********************************************************************/
-
-static int bdread(bufptr bp)
-{
-/*    printf("bdread(fd=%d, block %d)\n", dev_fd, bp->bf_blk); */
-
-	udata.u_buf = bp;
-	if (lseek
-	    (dev_fd, dev_offset + (((int) bp->bf_blk) * 512),
-	     SEEK_SET) == -1)
-		perror("lseek");
-	if (read(dev_fd, bp->bf_data, 512) != 512)
-		panic("read() failed");
-
-	return 0;
-}
-
-
-static int bdwrite(bufptr bp)
-{
-	udata.u_buf = bp;
-
-	lseek(dev_fd, dev_offset + (((int) bp->bf_blk) * 512), SEEK_SET);
-	if (write(dev_fd, bp->bf_data, 512) != 512)
-		panic("write() failed");
-	return 0;
-}

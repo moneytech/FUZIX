@@ -25,17 +25,18 @@
 	; platform provided functions
 	.globl map_kernel
 	.globl map_process_always
-        .globl map_save
+	.globl map_kernel_di
+	.globl map_process_always_di
+        .globl map_save_kernel
         .globl map_restore
 	.globl outchar
 	.globl _need_resched
 	.globl _inint
 	.globl _platform_interrupt
 	.globl platform_interrupt_all
-	.globl _switchout
+	.globl _platform_switchout
 
         ; exported symbols
-	.globl _chksigs
 	.globl null_handler
 	.globl unix_syscall_entry
         .globl _doexec
@@ -47,23 +48,31 @@
 	.globl ___hard_irqrestore
 	.globl _in
 	.globl _out
+	.globl _in16
+	.globl _out16
+	.globl _sys_cpu
+	.globl _sys_cpu_feat
+	.globl _sys_stubs
+	.globl _set_cpu_type
 
         ; imported symbols
-        .globl _trap_monitor
+	.globl _chksigs
+	.globl _int_disabled
+        .globl _platform_monitor
         .globl _unix_syscall
         .globl outstring
         .globl kstack_top
 	.globl istack_switched_sp
 	.globl istack_top
 	.globl _ssig
+	.globl _udata
+	.globl _doexit
 
         .include "platform/kernel.def"
-        .include "kernel.def"
+        .include "kernel-z80.def"
 
 ; these make the code below more readable. sdas allows us only to 
 ; test if an expression is zero or non-zero.
-CPU_CMOS_Z80	    .equ    Z80_TYPE-0
-CPU_NMOS_Z80	    .equ    Z80_TYPE-1
 CPU_Z180	    .equ    Z80_TYPE-2
 
         .area _COMMONMEM
@@ -78,7 +87,7 @@ CPU_Z180	    .equ    Z80_TYPE-2
 ;
 deliver_signals:
 	; Pending signal
-	ld a, (U_DATA__U_CURSIG)
+	ld a, (_udata + U_DATA__U_CURSIG)
 	or a
 	ret z
 
@@ -89,7 +98,7 @@ deliver_signals_2:
 
 	; Handler to use
 	add hl, hl
-	ld de, #U_DATA__U_SIGVEC
+	ld de, #_udata + U_DATA__U_SIGVEC
 	add hl, de
 	ld e, (hl)
 	inc hl
@@ -97,7 +106,10 @@ deliver_signals_2:
 
 	; Indicate processed
 	xor a
-	ld (U_DATA__U_CURSIG), a
+	ld (_udata + U_DATA__U_CURSIG), a
+	; and we will handle the signal with interrupts on so clear the
+	; flag
+	ld (_int_disabled),a
 
 	; Semantics for now: signal delivery clears handler
 	ld (hl), a
@@ -107,8 +119,8 @@ deliver_signals_2:
 	ld bc, #signal_return
 	push bc		; bc is passed in as the return vector
 
-	ex de, hl
 	ei
+	ld hl,(PROGLOAD+16)
 	jp (hl)		; return to user space. This will then return via
 			; the return path handler passed in BC
 
@@ -123,14 +135,16 @@ signal_return:
 	;	element of this processing, as we don't want to
 	;	set INSYS flags here.
 	;
-	ld (U_DATA__U_SYSCALL_SP), sp
+	ld (_udata + U_DATA__U_SYSCALL_SP), sp
 	ld sp, #kstack_top
-	call map_kernel
+	ld a,#1
+	ld (_int_disabled),a
+	call map_kernel_di
 	push af
 	call _chksigs
 	pop af
 	call map_process_always
-	ld sp, (U_DATA__U_SYSCALL_SP)
+	ld sp, (_udata + U_DATA__U_SYSCALL_SP)
 	jr deliver_signals
 
 
@@ -140,39 +154,40 @@ signal_return:
 unix_syscall_entry:
         di
         ; store processor state
-        ex af, af'
-        push af
-        ex af, af'
         exx
-        push bc
+	push bc
         push de
         push hl
         exx
         push bc
-        push de
         push ix
         push iy
-	; We don't save AF or HL
+	; We don't save AF / AF' / DE / HL. We do save BC because the 8080 user
+	; space will care about that when we unify them.
 
         ; locate function call arguments on the userspace stack
-        ld hl, #18     ; 16 bytes machine state, plus 2 bytes return address
+        ld hl, #16     ; 12 bytes machine state, plus 2 x 2 bytes return address
         add hl, sp
         ; save system call number
-        ld a, (hl)
-        ld (U_DATA__U_CALLNO), a
+        ld (_udata + U_DATA__U_CALLNO), a
         ; advance to syscall arguments
-        inc hl
-        inc hl
         ; copy arguments to common memory
-        ld bc, #8      ; four 16-bit values
-        ld de, #U_DATA__U_ARGN
-        ldir           ; copy
+        ld de, #_udata + U_DATA__U_ARGN
+
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
 
 	ld a, #1
-	ld (U_DATA__U_INSYS), a
+	ld (_udata + U_DATA__U_INSYS), a
 
         ; save process stack pointer
-        ld (U_DATA__U_SYSCALL_SP), sp
+        ld (_udata + U_DATA__U_SYSCALL_SP), sp
         ; switch to kernel stack
         ld sp, #kstack_top
 
@@ -201,15 +216,15 @@ unix_syscall_entry:
 	call map_process_always
 
 	xor a
-	ld (U_DATA__U_INSYS), a
+	ld (_udata + U_DATA__U_INSYS), a
 
 	; Back to the user stack
-	ld sp, (U_DATA__U_SYSCALL_SP)
+	ld sp, (_udata + U_DATA__U_SYSCALL_SP)
 
-	ld hl, (U_DATA__U_ERROR)
-	ld de, (U_DATA__U_RETVAL)
+	ld hl, (_udata + U_DATA__U_ERROR)
+	ld de, (_udata + U_DATA__U_RETVAL)
 
-	ld a, (U_DATA__U_CURSIG)
+	ld a, (_udata + U_DATA__U_CURSIG)
 	or a
 
 	; Fast path the normal case
@@ -235,18 +250,13 @@ unix_pop:
         ; restore machine state
         pop iy
         pop ix
-        ; pop hl ;; WRS: skip this!
-        pop de
-        pop bc
+	pop bc
         ; pop af ;; WRS: skip this!
         exx
         pop hl
         pop de
         pop bc
         exx
-        ex af, af'
-        pop af
-        ex af, af'
         ei
         ret ; must immediately follow EI
 
@@ -255,9 +265,9 @@ via_signal:
 	; Get off the kernel syscall stack before we start signal
 	; handling. Our signal handlers may themselves elect to make system
 	; calls. This means we must also save the error/return code
-	ld hl, (U_DATA__U_ERROR)
+	ld hl, (_udata + U_DATA__U_ERROR)
 	push hl
-	ld hl, (U_DATA__U_RETVAL)
+	ld hl, (_udata + U_DATA__U_RETVAL)
 	push hl
 
 	; Signal processing. This may longjmp back into userland
@@ -280,17 +290,17 @@ _doexec:
 	pop af ; bank number
         pop de ; start address
 
-        ld hl, (U_DATA__U_ISP)
+        ld hl, (_udata + U_DATA__U_ISP)
         ld sp, hl      ; Initialize user stack, below main() parameters and the environment
 
         ; u_data.u_insys = false
         xor a
-        ld (U_DATA__U_INSYS), a
+        ld (_udata + U_DATA__U_INSYS), a
 
         ex de, hl
 
 	; for the relocation engine - tell it where it is
-	ld iy, #PROGLOAD
+	ld de,#PROGLOAD
         ei
         jp (hl)
 
@@ -301,23 +311,23 @@ _doexec:
 ;
 null_handler:
 	; kernel jump to NULL is bad
-	ld a, (U_DATA__U_INSYS)
+	ld a, (_udata + U_DATA__U_INSYS)
 	or a
 	jp nz, trap_illegal
 	; user is merely not good
 	ld hl, #7
 	push hl
-	ld ix, (U_DATA__U_PTAB)
+	ld ix, (_udata + U_DATA__U_PTAB)
 	ld l,P_TAB__P_PID_OFFSET(ix)
 	ld h,P_TAB__P_PID_OFFSET+1(ix)
 	push hl
 	ld hl, #39		; signal (getpid(), SIGBUS)
-	rst #0x30		; syscall
+	call unix_syscall_entry; syscall
 	ld hl, #0xFFFF
 	push hl
 	dec hl			; #0
 	push hl
-	rst #0x30		; exit
+	call unix_syscall_entry; exit
 
 
 
@@ -327,7 +337,7 @@ illegalmsg: .ascii "[trap_illegal]"
 trap_illegal:
         ld hl, #illegalmsg
         call outstring
-        call _trap_monitor
+        call _platform_monitor
 
 dpsmsg: .ascii "[dispsig]"
         .db 13, 10, 0
@@ -340,7 +350,7 @@ nmi_handler:
 	call map_kernel
         ld hl, #nmimsg
         call outstring
-        jp _trap_monitor
+        jp _platform_monitor
 
 ;
 ;	Interrupt handler. Not quite the same as syscalls, we need to
@@ -387,28 +397,18 @@ interrupt_handler:
 	; Get onto the IRQ stack
 	ld (istack_switched_sp), sp
 	ld sp, #istack_top
-.ifeq PROGBASE
-	ld a, (0)
-.endif
 
-	call map_save
-	;
-	;	FIXME: re-implement sanity checks and add a stack one
-	;
+	call map_save_kernel
 
-	; We need the kernel mapped for the IRQ handling
-	call map_kernel
-
-.ifeq PROGBASE
-	cp #0xC3
-	call nz, null_pointer_trap
-.endif
 	; So the kernel can check rapidly for interrupt status
 	; FIXME: move to the C code
 	ld a, #1
 	ld (_inint), a
 	; So we know that this task should resume with IRQs off
-	ld (U_DATA__U_ININTERRUPT), a
+	ld (_udata + U_DATA__U_ININTERRUPT), a
+	; Load the interrupt flag properly. It got an implicit di from
+	; the IRQ being taken
+	ld (_int_disabled),a
 
 	push af
 	call _platform_interrupt
@@ -431,7 +431,7 @@ interrupt_handler:
 
 intout:
 	xor a
-	ld (U_DATA__U_ININTERRUPT), a
+	ld (_udata + U_DATA__U_ININTERRUPT), a
 
 	ld hl, #intret
 	push hl
@@ -441,9 +441,15 @@ intout:
 				; have DI set
 intret:
 	di
-	ld a, (U_DATA__U_INSYS)
+	ld a, (_udata + U_DATA__U_INSYS)
 	or a
 	jr nz, interrupt_pop
+
+.ifeq PROGBASE
+	ld a, (0)
+	cp #0xC3
+	jp nz, null_pointer_trap
+.endif
 
 	; Loop through any pending signals. These could longjmp out
 	; of the handler so ensure everything is fixed before this !
@@ -452,6 +458,8 @@ intret:
 
 	; Then unstack and go.
 interrupt_pop:
+	xor a
+	ld (_int_disabled),a
         pop iy
         pop ix
         pop hl
@@ -470,22 +478,19 @@ interrupt_pop:
 	ret			; runs in the ei interrupt shadow
 
 ;
-;	Called with the kernel mapped, mid interrupt and on the IRQ stack
+;	At the point we fire we are back on the user stack and logically
+;	speaking have just finished the interrupt. If the low byte was
+;	corrupt we assume the worst and just blow the process away
 ;
 null_pointer_trap:
 	ld a, #0xC3
 	ld (0), a
-	ld hl, #11		; SIGSEGV
-trap_signal:
+	ld hl, #9		; SIGSEGV
 	push hl
-	ld hl, (U_DATA__U_PTAB);
-        push hl
 	push af
-        call _ssig
+	call _doexit
 	pop af
-        pop hl
-        pop hl
-	ret
+	jp _platform_monitor
 
 ;
 ;	Pre-emption. We need to get off the interrupt stack, switch task
@@ -502,7 +507,7 @@ preemption:
 	call map_restore
 
 	ld hl, (istack_switched_sp)
-	ld (U_DATA__U_SYSCALL_SP), hl
+	ld (_udata + U_DATA__U_SYSCALL_SP), hl
 
 	ld sp, #kstack_top	; We don't pre-empt in a syscall
 				; so this is fine
@@ -521,27 +526,40 @@ preemption:
 	; hence the need to reti
 
 	;
-intret2:call map_kernel
-
+intret2:di
+	call map_kernel
 	;
 	; Semantically we are doing a null syscall for pre-empt. We need
 	; to record ourselves as in a syscall so we can't be recursively
 	; pre-empted when switchout re-enables interrupts.
 	;
 	ld a, #1
-	ld (U_DATA__U_INSYS), a
+	ld (_udata + U_DATA__U_INSYS), a
+	;
+	; Check for signals
+	;
+	push af
+	call _chksigs
+	pop af
+
 	;
 	; Process status is offset 0
 	;
-	ld hl, (U_DATA__U_PTAB)
+	ld hl, (_udata + U_DATA__U_PTAB)
+	ld a, #P_RUNNING
+	cp (hl)
+	jr nz, not_running
 	ld (hl), #P_READY
-	call _switchout
+	inc hl
+	set PFL_BATCH,(hl)
+not_running:
+	call _platform_switchout
 	;
 	; We are no longer in an interrupt or a syscall
 	;
 	xor a
-	ld (U_DATA__U_ININTERRUPT), a
-	ld (U_DATA__U_INSYS), a
+	ld (_udata + U_DATA__U_ININTERRUPT), a
+	ld (_udata + U_DATA__U_INSYS), a
 	;
 	; We have been rescheduled, remap ourself and go back to user
 	; space via signal handling
@@ -550,8 +568,8 @@ intret2:call map_kernel
 
 	; We were pre-empted but have now been rescheduled
 	; User stack
-	ld sp, (U_DATA__U_SYSCALL_SP)
-	ld a, (U_DATA__U_CURSIG)
+	ld sp, (_udata + U_DATA__U_SYSCALL_SP)
+	ld a, (_udata + U_DATA__U_CURSIG)
 	or a
 	call nz, deliver_signals_2
 	;
@@ -657,31 +675,63 @@ _out:
 	push de
 	jp (hl)
 
-_in:
-	pop hl
-	pop de
-	pop bc
-	push bc
+_out16:
+	pop hl	; return
+	pop iy	; bank
+	pop bc	; port
+	pop de	; data
 	push de
-	push hl
+	push bc
+	push iy
+	out (c),e
+	jp (hl)
+
+_in16:
+	ld b,h
+_in:
+	ld c,l
 	in l, (c)
 	ret
 
-
 ;
-;	Pull in the CPU specific workarounds
+;	Deal with all the NMOS Z80 bugs and the buggy emulators by
+;	simply tracing our own interrupt status. It's cheaper this way
+;	but does mean any code that is using di and friends directly needs
+;	to be a lot more careful. We can also make irqflags_t 8bit and
+;	fastcall the irqrestore later on FIXME
 ;
+___hard_ei:
+	xor a
+	ld (_int_disabled),a
+	ei
+	ret
 
-.ifeq CPU_NMOS_Z80
-	.include "lowlevel-z80-nmos-banked.s"
-.else
-	.include "lowlevel-z80-cmos-banked.s"
-.endif
+___hard_di:
+	ld hl,#_int_disabled
+	di
+	ld a,(hl)
+	ld (hl),#1
+	ld l,a
+	ret
+
+___hard_irqrestore:
+	pop bc
+	pop de
+	pop hl
+	push hl
+	push de
+	push bc
+	di
+	ld a,l
+	ld (_int_disabled),a
+	or a
+	ret nz
+	ei
+	ret
 
 	.area _COMMONMEM
 
 	.globl ___sdcc_enter_ix
-	.globl ___sdcc_enter_ix_n
 
 ___sdcc_enter_ix:
 	pop hl		; return address
@@ -689,23 +739,6 @@ ___sdcc_enter_ix:
 	ld ix, #0
 	add ix, sp	; set ix to the stack frame
 	jp (hl)		; and return
-
-;
-; Not used unless experimentally patched sdcc
-;
-___sdcc_enter_ix_n:
-	pop hl		; return address
-	push ix		; save frame pointer
-	ld ix, #0
-	add ix, sp	; frame pointer
-	ld e, (hl)	; size byte
-	ld d, #0xFF	; always minus something..
-	inc hl
-	ex de, hl
-	add hl, sp
-	ld sp, hl
-	push de
-	ret
 
 ;
 ;	This must be in common in banked builds
@@ -1256,11 +1289,13 @@ __mul16::
 
 	.globl _memmove
 	.globl _memcpy
+	.globl ___memcpy
 
 ; The Z80 has the ldir and lddr instructions, which are perfect for implementing memmove().
 
 _memcpy:
 _memmove:
+___memcpy:
 	pop	af
 	pop	iy
 	pop	hl
@@ -1293,3 +1328,41 @@ memmove_up:
 	pop	hl
 	ret
 
+	.area _CONST
+
+_sys_stubs:
+	jp unix_syscall_entry
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+
+	.area _DATA
+
+_sys_cpu:
+	.db 0
+_sys_cpu_feat:
+	.db 0
+
+	.area _DISCARD
+
+_set_cpu_type:
+	ld h,#2		; Assume Z80
+	xor a
+	dec a
+	daa
+	jr c,is_z80
+	ld h,#6		; Nope Z180
+is_z80:
+	ld l,#1		; 8080 family
+	ld (_sys_cpu),hl	; Write cpu and cpu feat
+	ret

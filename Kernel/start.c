@@ -3,11 +3,10 @@
 #include <kdata.h>
 #include <printf.h>
 #include <tty.h>
-#include <config.h>
 
 #define BAD_ROOT_DEV 0xFFFF
 
-static uint8_t ro;
+static uint8_t ro = 1;
 
 /*
  *	Put nothing here that cannot be discarded. We make the entirety
@@ -21,7 +20,7 @@ static uint8_t ro;
 static const struct termios ttydflt = {
 	BRKINT | ICRNL,
 	OPOST | ONLCR,
-	CS8 | TTY_INIT_BAUD | CREAD | HUPCL,
+	CS8 | TTY_INIT_BAUD | CREAD | CLOCAL,
 	ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN,
 	{CTRL('D'), 0, CTRL('H'), CTRL('C'),
 	 CTRL('U'), CTRL('\\'), CTRL('Q'), CTRL('S'),
@@ -31,7 +30,7 @@ static const struct termios ttydflt = {
 
 void tty_init(void) {
         struct tty *t = &ttydata[1];
-        int i;
+        uint_fast8_t i;
         for(i = 1; i <= NUM_DEV_TTY; i++) {
 		memcpy(&t->termios, &ttydflt, sizeof(struct termios));
 		t++;
@@ -45,6 +44,8 @@ void bufinit(void)
 	for (bp = bufpool; bp < bufpool_end; ++bp) {
 		bp->bf_dev = NO_DEVICE;
 		bp->bf_busy = BF_FREE;
+		bp->bf_dirty = 0;
+		bp->bf_time = 0;
 	}
 }
 
@@ -79,26 +80,31 @@ void add_argument(const char *s)
 
 void create_init(void)
 {
-	uint8_t *j;
+	uint8_t *j, *e;
 
+	udata.u_top = PROGLOAD + 512;	/* Plenty for the boot */
 	init_process = ptab_alloc();
 	udata.u_ptab = init_process;
-	udata.u_top = PROGLOAD + 4096;	/* Plenty for the boot */
 	init_process->p_top = udata.u_top;
 	map_init();
-	newproc(init_process);
+
+	/* wipe file table */
+	e = udata.u_files + UFTSIZE;
+	for (j = udata.u_files; j < e; ++j)
+		*j = NO_FILE;
+
+	makeproc(init_process, &udata);
+	init_process->p_status = P_RUNNING;
 
 	udata.u_insys = 1;
 
 	init_process->p_status = P_RUNNING;
 
-	/* wipe file table */
-	for (j = udata.u_files; j < (udata.u_files + UFTSIZE); ++j) {
-		*j = NO_FILE;
-	}
 	/* Poke the execve arguments into user data space so _execve() can read them back */
+	/* Some systems only have a tiny window we can use at boot as most of
+	   this space is loaded with common memory */
 	argptr = PROGLOAD;
-	progptr = PROGLOAD + 2048;
+	progptr = PROGLOAD + 256;
 
 	uzero((void *)progptr, 32);
 	add_argument("/init");
@@ -109,9 +115,9 @@ void complete_init(void)
 	/* Terminate argv, also use this as the env ptr */
 	uputp(0, (void *)argptr);
 	/* Set up things to look like the process is calling _execve() */
-	udata.u_argn =  (arg_t)PROGLOAD + 2048; /* "/init" */
-	udata.u_argn1 = (arg_t)PROGLOAD; /* Arguments */
 	udata.u_argn2 = (arg_t)argptr; /* Environment (none) */
+	udata.u_argn =  (arg_t)PROGLOAD + 256; /* "/init" */
+	udata.u_argn1 = (arg_t)PROGLOAD; /* Arguments */
 
 #ifdef CONFIG_LEVEL_2
 	init_process->p_session = 1;
@@ -280,8 +286,8 @@ uint16_t get_root_dev(void)
 
 	if (cmdline && *cmdline){
 		rd = bootdevice(cmdline);
-                cmdline=NULL;                   /* ignore cmdline if get_root_dev() is called again */
         }
+        cmdline = NULL;                   /* ignore cmdline if get_root_dev() is called again */
 
 	while(rd == BAD_ROOT_DEV){
 		kputs("bootdev: ");
@@ -289,23 +295,46 @@ uint16_t get_root_dev(void)
 		udata.u_sysio = 1;
 		udata.u_count = sizeof(bootline)-1;
 		udata.u_euid = 0;		/* Always begin as superuser */
+		udata.u_done = 0;
 
 		cdread(TTYDEV, O_RDONLY);	/* read root filesystem name from tty */
+		bootline[udata.u_done] = 0;
 		rd = bootdevice(bootline);
 	}
 
 	return rd;
 }
+
+void set_boot_line(const char *p)
+{
+	/* This is a little bit ugly but we want it in discard. Override any
+	   command line if the user already hit a key */
+	/* Give the user bit of time by calling pause(10) */
+	udata.u_argn = 10;
+	_pause();
+	if (!tty_pending(TTYDEV)) {
+		memcpy(bootline, p, 63);
+		cmdline = bootline;
+	}
+}
+
 #else
+
+static uint8_t first = 1;
 
 inline uint16_t get_root_dev(void)
 {
-	return BOOTDEVICE;
+	if (first) {
+		first = 0;
+		return BOOTDEVICE;
+	}
+	return BAD_ROOT_DEV;
 }
 #endif
 
 void fuzix_main(void)
 {
+	struct mount *m;
 	/* setup state */
 	inint = false;
 	udata.u_insys = true;
@@ -325,9 +354,13 @@ void fuzix_main(void)
 			"Copyright (c) 1988-2002 by H.F.Bower, D.Braun, S.Nitschke, H.Peraza\n"
 			"Copyright (c) 1997-2001 by Arcady Schekochikhin, Adriano C. R. da Cunha\n"
 			"Copyright (c) 2013-2015 Will Sowerbutts <will@sowerbutts.com>\n"
-			"Copyright (c) 2014-2017 Alan Cox <alan@etchedpixels.co.uk>\nDevboot\n",
+			"Copyright (c) 2014-2020 Alan Cox <alan@etchedpixels.co.uk>\nDevboot\n",
 			sysinfo.uname);
 
+	set_cpu_type();
+	sysinfo.cpu[0] = sys_cpu_feat;
+	sysinfo.cputype = sys_cpu;
+	platform_copyright();
 #ifndef SWAPDEV
 #ifdef PROC_SIZE
 	maxproc = procmem / PROC_SIZE;
@@ -347,12 +380,13 @@ void fuzix_main(void)
 	   scheduling and the like */
 	ptab_end = &ptab[maxproc];
 
-	/* Parameters message */
-	kprintf("%dkB total RAM, %dkB available to processes (%d processes max)\n", ramsize, procmem, maxproc);
 	bufinit();
 	fstabinit();
 	pagemap_init();
 	create_init();
+
+	/* Parameters message */
+	kprintf("%dkB total RAM, %dkB available to processes (%d processes max)\n", ramsize, procmem, maxproc);
 
 	/* runtime configurable, defaults to build time setting */
 	ticks_per_dsecond = TICKSPERSEC / 10;
@@ -364,21 +398,30 @@ void fuzix_main(void)
 	/* initialise hardware devices */
 	device_init();
 
-        while(true){
+	do {
             old_progptr = progptr;
             old_argptr = argptr;
             /* Get a root device to try */
             root_dev = get_root_dev();
+            if (root_dev == BAD_ROOT_DEV)
+                panic(PANIC_NOROOT);
             /* Mount the root device */
             kprintf("Mounting root fs (root_dev=%d, r%c): ", root_dev, ro ? 'o' : 'w');
-            if(fmount(root_dev, NULLINODE, ro) == 0)
-                break;
-            kputs("failed\n");
-            /* reset potentially altered state before prompting the user for command line again */
-            progptr = old_progptr;
-            argptr = old_argptr;
-            ro = 0;
-        }
+            m = fmount(root_dev, NULLINODE, ro);
+            if (m == NULL) {
+	            kputs("failed\n");
+		    /* reset potentially altered state before prompting the user for command line again */
+	            progptr = old_progptr;
+		    argptr = old_argptr;
+	            ro = MS_RDONLY;
+	    }
+        } while(m == NULL);
+
+        /* Set the system time from the superblock. In turn user space will
+           set it from the user or rtc when prompted. Setting it here
+           however means the date is often right and that time goes forward */
+        tod.low = m->m_fs.s_time;
+        tod.high = m->m_fs.s_timeh;
 
 	root = i_open(root_dev, ROOTINODE);
 	if (!root)
@@ -391,7 +434,7 @@ void fuzix_main(void)
 
 	udata.u_cwd = i_ref(root);
 	udata.u_root = i_ref(root);
-	rdtime32(&udata.u_time);
+	udata.u_ptab->p_time = ticks.full;
 	exec_or_die();
 }
 

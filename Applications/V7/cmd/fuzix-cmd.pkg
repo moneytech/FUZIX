@@ -1,3 +1,7 @@
+package  V7-cmd-micro
+if-file  accton
+f 0755 /bin/ed		      ed
+
 package  V7-cmd
 if-file  accton
 
@@ -5,6 +9,7 @@ f 0755 /usr/bin/accton        accton
 ##f 0755 /usr/bin/ac            ac
 ##f 0755 /usr/bin/at            at
 f 0755 /usr/bin/atrun         atrun
+f 0755 /usr/bin/clear		clear
 ##f 0755 /usr/bin/col           col
 f 0755 /usr/bin/comm          comm
 f 0755 /usr/bin/cron          cron
@@ -30,6 +35,7 @@ f 0755 /usr/bin/sum           sum
 f 0755 /usr/bin/time          time
 f 0755 /usr/bin/tsort         tsort
 f 0755 /usr/bin/wall          wall
+f 0755 /usr/bin/pg            pg
 
 # Man pages - in a separate package so that storage-limited targets can
 # disable it.

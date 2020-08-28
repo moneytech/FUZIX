@@ -31,16 +31,25 @@
 #include <kdata.h>
 #include <printf.h>
 
+#undef DEBUG
+
 #ifdef CONFIG_BANK_FIXED
 
-#ifndef CONFIG_COMMON_COPY
-#define flush_cache(p)	do {} while(0)
+/*
+ *	The page value is 16bit, but our internal map table is 8bit. There
+ *	are cases where the caller wants to use the full 16bits and expand
+ *	compact the representation. The default behaviour is a 1:1 map
+ */
+
+#ifndef MAP_TRANS_8TO16
+# define MAP_TRANS_8TO16(M)	(M)
+# define MAP_TRANS_16TO8(M)	(M)
 #endif
 
 /* Kernel is 0, apps 1,2,3 etc */
-static unsigned char pfree[MAX_MAPS];
-static unsigned char pfptr = 0;
-static unsigned char pfmax;
+static uint8_t pfree[MAX_MAPS];
+static uint_fast8_t pfptr = 0;
+static uint_fast8_t pfmax;
 
 void pagemap_add(uint8_t page)
 {
@@ -52,7 +61,7 @@ void pagemap_free(ptptr p)
 {
 	if (p->p_page == 0)
 		panic(PANIC_FREE0);
-	pfree[pfptr++] = p->p_page;
+	pfree[pfptr++] = MAP_TRANS_16TO8(p->p_page);
 }
 
 int pagemap_alloc(ptptr p)
@@ -64,15 +73,28 @@ int pagemap_alloc(ptptr p)
 #endif
 	if (pfptr == 0)
 		return ENOMEM;
-	p->p_page = pfree[--pfptr];
+	p->p_page = MAP_TRANS_8TO16(pfree[--pfptr]);
 	return 0;
 }
 
-/* Realloc is trivial - we can't do anything useful */
-int pagemap_realloc(usize_t size)
+/* Realloc is a no-op */
+int pagemap_realloc(struct exec *hdr, uint16_t size)
 {
-	if (size > MAP_SIZE)
-		return ENOMEM;
+	return 0;
+}
+
+int pagemap_prepare(struct exec *hdr)
+{
+	/* If it is relocatable load it at PROGLOAD */
+	if (hdr->a_base == 0)
+		hdr->a_base = PROGLOAD >> 8;
+	/* If it doesn't care about the size then the size is all the
+	   space we have */
+	if (hdr->a_size == 0)
+		hdr->a_size = (ramtop >> 8) - hdr->a_base;
+	/* Check it fits - we can do this early for fixed banks */
+	if (hdr->a_size > (MAP_SIZE >> 8))
+		return -1;
 	return 0;
 }
 
@@ -93,17 +115,17 @@ int swapout(ptptr p)
 {
 	uint16_t page = p->p_page;
 	uint16_t blk;
-	uint16_t map;
+	int16_t map;
 
 	if (!page)
 		panic(PANIC_ALREADYSWAP);
-#ifdef DEBUG
-	kprintf("Swapping out %x (%d)\n", p, p->p_page);
-#endif
 	/* Are we out of swap ? */
 	map = swapmap_alloc();
-	if (map == 0)
+	if (map == -1)
 		return ENOMEM;
+#ifdef DEBUG
+	kprintf("Swapping out %x (%d) to map %d\n", p, p->p_page, map);
+#endif
 	blk = map * SWAP_SIZE;
 	/* Write the app (and possibly the uarea etc..) to disk */
 	swapwrite(SWAPDEV, blk, SWAPTOP - SWAPBASE, SWAPBASE, p->p_page);
@@ -124,7 +146,7 @@ void swapin(ptptr p, uint16_t map)
 	uint16_t blk = map * SWAP_SIZE;
 
 #ifdef DEBUG
-	kprintf("Swapin %x, %d\n", p, p->p_page);
+	kprintf("Swapin %x, %d from map %d\n", p, p->p_page, map);
 #endif
 	if (!p->p_page) {
 		kprintf("%x: nopage!\n", p);

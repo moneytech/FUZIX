@@ -6,10 +6,10 @@
 #include <devtty.h>
 #include <zeta-v2.h>
 
-char tbuf1[TTYSIZ];
+static char tbuf1[TTYSIZ];
 
 #ifdef CONFIG_PPP
-char tbufp[TTYSIZ];
+static char tbufp[TTYSIZ];
 #endif
 
 unsigned char uart0_type;
@@ -22,6 +22,15 @@ struct  s_queue  ttyinq[NUM_DEV_TTY+1] = {       /* ttyinq[0] is never used */
 #endif
 };
 
+tcflag_t termios_mask[NUM_DEV_TTY + 1] = {
+	0,
+	CSIZE|CBAUD|CSTOPB|PARENB|PARODD|_CSYS,
+#ifdef CONFIG_PPP
+	_CSYS
+#endif
+};
+
+
 uint16_t divisor_table[16] = {
 	0, UART_CLOCK / 16 / 50, UART_CLOCK / 16 / 75, UART_CLOCK / 16 / 110,
 	UART_CLOCK / 16 / 134, UART_CLOCK / 16 / 150, UART_CLOCK / 16 / 300,
@@ -31,7 +40,7 @@ uint16_t divisor_table[16] = {
 	UART_CLOCK / 16 / 57600, UART_CLOCK / 16 / 115200
 };
 
-void tty_setup(uint8_t minor)
+void tty_setup(uint8_t minor, uint8_t flags)
 {
 	uint16_t b;
 	uint8_t lcr = 0;
@@ -132,6 +141,10 @@ void tty_sleeping(uint8_t minor)
 	if (minor == 1) {
 		UART0_IER = 0x0B; /* enable all but LSR interrupt */
 	}
+}
+
+void tty_data_consumed(uint8_t minor)
+{
 }
 
 ttyready_t tty_writeready(uint8_t minor)

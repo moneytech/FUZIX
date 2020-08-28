@@ -23,47 +23,56 @@
 	.globl outnibble
 
 	; platform provided functions
-	.globl map_kernel
-	.globl map_process_always
-        .globl map_save
+	.globl map_kernel_di
+	.globl map_process_always_di
+        .globl map_save_kernel
         .globl map_restore
 	.globl outchar
 	.globl _inint
 	.globl _platform_interrupt
 	.globl platform_interrupt_all
 	.globl _need_resched
-	.globl _switchout
+	.globl _platform_switchout
 
         ; exported symbols
-	.globl _chksigs
 	.globl null_handler
 	.globl unix_syscall_entry
         .globl _doexec
-        .globl trap_illegal
 	.globl nmi_handler
 	.globl interrupt_handler
+	.globl synchronous_fault
 	.globl ___hard_ei
 	.globl ___hard_di
 	.globl ___hard_irqrestore
 	.globl _out
 	.globl _in
+	.globl _out16
+	.globl _in16
+	.globl _sys_cpu
+	.globl _sys_cpu_feat
+	.globl _sys_stubs
+	.globl _set_cpu_type
+
+	.globl mmu_irq_ret
 
         ; imported symbols
-        .globl _trap_monitor
+	.globl _chksigs
+	.globl _int_disabled
+        .globl _platform_monitor
+	.globl _doexit
         .globl _unix_syscall
         .globl outstring
         .globl kstack_top
 	.globl istack_switched_sp
 	.globl istack_top
 	.globl _ssig
+	.globl _udata
 
         .include "platform/kernel.def"
-        .include "kernel.def"
+        .include "kernel-z80.def"
 
 ; these make the code below more readable. sdas allows us only to 
 ; test if an expression is zero or non-zero.
-CPU_CMOS_Z80	    .equ    Z80_TYPE-0
-CPU_NMOS_Z80	    .equ    Z80_TYPE-1
 CPU_Z180	    .equ    Z80_TYPE-2
 
         .area _COMMONMEM
@@ -77,7 +86,7 @@ CPU_Z180	    .equ    Z80_TYPE-2
 ;
 deliver_signals:
 	; Pending signal
-	ld a, (U_DATA__U_CURSIG)
+	ld a, (_udata + U_DATA__U_CURSIG)
 	or a
 	ret z
 
@@ -88,7 +97,7 @@ deliver_signals_2:
 
 	; Handler to use
 	add hl, hl
-	ld de, #U_DATA__U_SIGVEC
+	ld de, #_udata + U_DATA__U_SIGVEC
 	add hl, de
 	ld e, (hl)
 	inc hl
@@ -96,7 +105,10 @@ deliver_signals_2:
 
 	; Indicate processed
 	xor a
-	ld (U_DATA__U_CURSIG), a
+	ld (_udata + U_DATA__U_CURSIG), a
+	; and we will handle the signal with interrupts on so clear the
+	; flag
+	ld (_int_disabled),a
 
 	; Semantics for now: signal delivery clears handler
 	ld (hl), a
@@ -106,75 +118,94 @@ deliver_signals_2:
 	ld bc, #signal_return
 	push bc		; bc is passed in as the return vector
 
-	ex de, hl
 	ei
-	jp (hl)		; return to user space. This will then return via
-			; the return path handler passed in BC
-
+	.ifne Z80_MMU_HOOKS
+	call mmu_user		; must preserve HL
+	.endif
+	ld hl,(PROGLOAD+16); return to user space. This will then return via
+			; the return path handler stacked above via BC
+	jp (hl)
 ;
 ;	Syscall signal return path
 ;
 signal_return:
 	pop hl		; argument
 	di
+	.ifne Z80_MMU_HOOKS
+	call mmu_kernel
+	.endif
 	;
 	;	We must keep IRQ disabled in the kernel mapped
 	;	element of this processing, as we don't want to
 	;	set INSYS flags here.
 	;
-	ld (U_DATA__U_SYSCALL_SP), sp
+	ld (_udata + U_DATA__U_SYSCALL_SP), sp
 	ld sp, #kstack_top
-	call map_kernel
+	;
+	;	Ensure chksigs and friends see the right status
+	;
+	ld a,#1
+	ld (_int_disabled),a
+	call map_kernel_di
 	call _chksigs
-	call map_process_always
-	ld sp, (U_DATA__U_SYSCALL_SP)
+	call map_process_always_di
+	ld sp, (_udata + U_DATA__U_SYSCALL_SP)
 	jr deliver_signals
 
 
 ;
 ;	Syscall processing path
 ;
+;	This is the first part of the big API change. This is in effect
+;	a temporary ABI so don't build stuff to it!
+;
 unix_syscall_entry:
+	; We know the previous state was EI and that we won't do anything
+	; clever until we EI again, so we can avoid the helpers on the fast
+	; path.
         di
-        ; store processor state
-        ex af, af'
-        push af
-        ex af, af'
+        ; store processor state. We destroy AF, AF', DE, HL
         exx
         push bc
         push de
         push hl
         exx
-        push bc
-        push de
+	push bc
         push ix
         push iy
-	; We don't save AF or HL
 
         ; locate function call arguments on the userspace stack
-        ld hl, #18     ; 16 bytes machine state, plus 2 bytes return address
+        ld hl, #16     ; 12 bytes machine state, plus 2 bytes return address x 2
         add hl, sp
+
+	.ifne Z80_MMU_HOOKS
+	call mmu_kernel			; must preserve A,HL
+	.endif
         ; save system call number
-        ld a, (hl)
-        ld (U_DATA__U_CALLNO), a
+        ld (_udata + U_DATA__U_CALLNO), a
         ; advance to syscall arguments
-        inc hl
-        inc hl
         ; copy arguments to common memory
-        ld bc, #8      ; four 16-bit values
-        ld de, #U_DATA__U_ARGN
-        ldir           ; copy
+        ld de, #_udata + U_DATA__U_ARGN
+
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
+	ldi
 
 	ld a, #1
-	ld (U_DATA__U_INSYS), a
+	ld (_udata + U_DATA__U_INSYS), a
 
         ; save process stack pointer
-        ld (U_DATA__U_SYSCALL_SP), sp
+        ld (_udata + U_DATA__U_SYSCALL_SP), sp
         ; switch to kernel stack
         ld sp, #kstack_top
 
         ; map in kernel keeping common
-	call map_kernel
+	call map_kernel_di
 
         ; re-enable interrupts
         ei
@@ -190,21 +221,24 @@ unix_syscall_entry:
 	; The fork case returns with a different U_DATA mapped so the
 	; U_DATA referencing code is fine, but globals are usually not
 
-        di
+        di	; Again we know we won't mess up calling di/ei directly
 
 
-	call map_process_always
+	; FIXME: another spot we di but have the flag wrong and call stuff
+	; although we probably just need a rule that _di versions can't
+	; rely on it!
+	call map_process_always_di
 
 	xor a
-	ld (U_DATA__U_INSYS), a
+	ld (_udata + U_DATA__U_INSYS), a
 
 	; Back to the user stack
-	ld sp, (U_DATA__U_SYSCALL_SP)
+	ld sp, (_udata + U_DATA__U_SYSCALL_SP)
 
-	ld hl, (U_DATA__U_ERROR)
-	ld de, (U_DATA__U_RETVAL)
+	ld hl, (_udata + U_DATA__U_ERROR)
+	ld de, (_udata + U_DATA__U_RETVAL)
 
-	ld a, (U_DATA__U_CURSIG)
+	ld a, (_udata + U_DATA__U_CURSIG)
 	or a
 
 	; Fast path the normal case
@@ -227,21 +261,18 @@ not_error:
 	; Undo the stacking and go back to user space
 	;
 unix_pop:
+	.ifne Z80_MMU_HOOKS
+	call mmu_user		; must preserve HL
+	.endif
         ; restore machine state
         pop iy
         pop ix
-        ; pop hl ;; WRS: skip this!
-        pop de
-        pop bc
-        ; pop af ;; WRS: skip this!
+	pop bc
         exx
         pop hl
         pop de
         pop bc
         exx
-        ex af, af'
-        pop af
-        ex af, af'
         ei
         ret ; must immediately follow EI
 
@@ -250,9 +281,9 @@ via_signal:
 	; Get off the kernel syscall stack before we start signal
 	; handling. Our signal handlers may themselves elect to make system
 	; calls. This means we must also save the error/return code
-	ld hl, (U_DATA__U_ERROR)
+	ld hl, (_udata + U_DATA__U_ERROR)
 	push hl
-	ld hl, (U_DATA__U_RETVAL)
+	ld hl, (_udata + U_DATA__U_RETVAL)
 	push hl
 
 	; Signal processing. This may longjmp back into userland
@@ -270,73 +301,68 @@ via_signal:
 ;
 _doexec:
         di
-        call map_process_always
+        call map_process_always_di
 
         pop bc ; return address
         pop de ; start address
 
-        ld hl, (U_DATA__U_ISP)
+        ld hl, (_udata + U_DATA__U_ISP)
         ld sp, hl      ; Initialize user stack, below main() parameters and the environment
 
         ; u_data.u_insys = false
         xor a
-        ld (U_DATA__U_INSYS), a
+        ld (_udata + U_DATA__U_INSYS), a
 
         ex de, hl
 
+	.ifne Z80_MMU_HOOKS
+	call mmu_user		; must preserve HL
+	.endif
 	; for the relocation engine - tell it where it is
-	ld iy, #PROGLOAD
+	ld de, #PROGLOAD
         ei
         jp (hl)
 
 ;
-;  Called from process context (hopefully)
-;
-;  FIXME: hardcoded RST30 won't work on all boxes
+;	We took a NULL pointer - either a branch to NULL or on Z180
+;	an illegal. For now use a blunt instrument. We could in theory
+;	do a nicer signal throw etc.
 ;
 null_handler:
+	di
 	; kernel jump to NULL is bad
-	ld a, (U_DATA__U_INSYS)
+	ld a, (_udata + U_DATA__U_INSYS)
 	or a
 	jp nz, trap_illegal
-	; user is merely not good
-	ld hl, #7
+	ld a, (_inint)
+	or a
+	jp nz, trap_illegal
+	; user is merely not good - handle it synchronously
+	ld hl,#9		; SIGKILL
+synchronous_fault:
+	ld sp,#kstack_top
+	call map_kernel_di
 	push hl
-	ld ix, (U_DATA__U_PTAB)
-	ld l,P_TAB__P_PID_OFFSET(ix)
-	ld h,P_TAB__P_PID_OFFSET+1(ix)
-	push hl
-	ld hl, #39		; signal (getpid(), SIGBUS)
-	push hl
-	rst #0x30		; syscall
-	ld hl, #0xFFFF
-	push hl
-	dec hl			; #0
-	push hl
-	rst #0x30		; exit
-
-
+	call _doexit
+trap_illegal:
+        ld hl, #illegalmsg
+traphl:
+        call outstring
+        call _platform_monitor
 
 illegalmsg: .ascii "[illegal]"
             .db 13, 10, 0
-
-trap_illegal:
-        ld hl, #illegalmsg
-        call outstring
-        call _trap_monitor
-
-dpsmsg: .ascii "[dispsig]"
-        .db 13, 10, 0
-
 
 nmimsg: .ascii "[NMI]"
         .db 13,10,0
 
 nmi_handler:
-	call map_kernel
+	.ifne Z80_MMU_HOOKS
+	call mmu_kernel
+	.endif
+	call map_kernel_di
         ld hl, #nmimsg
-        call outstring
-        jp _trap_monitor
+	jr traphl
 
 ;
 ;	Interrupt handler. Not quite the same as syscalls, we need to
@@ -359,6 +385,15 @@ interrupt_handler:
         push hl
         push ix
         push iy
+	;
+	; This is a bit exciting - if our MMU enforces r/o then the entire
+	; stack state might be bogus!
+	;
+	.ifne Z80_MMU_HOOKS
+	ld hl, #mmu_irq_ret
+	jp mmu_kernel_irq
+	.endif
+mmu_irq_ret:
 
 	; Some platforms (MSX for example) have devices we *must*
 	; service irrespective of kernel state in order to shut them
@@ -384,25 +419,17 @@ interrupt_handler:
 	ld (istack_switched_sp), sp
 	ld sp, #istack_top
 
-	ld a, (0)
-
-	call map_save
-	;
-	;	FIXME: re-implement sanity checks and add a stack one
-	;
-
-	; We need the kernel mapped for the IRQ handling
-	call map_kernel
-
-	cp #0xC3
-	call nz, null_pointer_trap
+	call map_save_kernel
 
 	; So the kernel can check rapidly for interrupt status
 	; FIXME: move to the C code
 	ld a, #1
 	ld (_inint), a
 	; So we know that this task should resume with IRQs off
-	ld (U_DATA__U_ININTERRUPT), a
+	ld (_udata + U_DATA__U_ININTERRUPT), a
+	; Load the interrupt flag properly. It got an implicit di from
+	; the IRQ being taken
+	ld (_int_disabled),a
 
 	call _platform_interrupt
 
@@ -423,8 +450,15 @@ interrupt_handler:
 
 intout:
 	xor a
-	ld (U_DATA__U_ININTERRUPT), a
-
+	ld (_udata + U_DATA__U_ININTERRUPT), a
+	;
+	;	Z180 internal interrupts do not reti
+	;
+.ifeq CPU_Z180
+	ld a,(_irqvector)
+	or a
+	jr nz, intret
+.endif
 	ld hl, #intret
 	push hl
 	reti			; We have now 'left' the interrupt
@@ -433,10 +467,13 @@ intout:
 				; have DI set
 intret:
 	di
-	ld a, (U_DATA__U_INSYS)
+	ld a, (_udata + U_DATA__U_INSYS)
 	or a
 	jr nz, interrupt_pop
 
+	ld a,(0)
+	cp #0xC3
+	jp nz, null_pointer_trap
 	; Loop through any pending signals. These could longjmp out
 	; of the handler so ensure everything is fixed before this !
 
@@ -444,6 +481,11 @@ intret:
 
 	; Then unstack and go.
 interrupt_pop:
+	xor a
+	ld (_int_disabled),a
+	.ifne Z80_MMU_HOOKS
+	call mmu_restore_irq
+	.endif
         pop iy
         pop ix
         pop hl
@@ -462,21 +504,27 @@ interrupt_pop:
 	ret			; runs in the ei interrupt shadow
 
 ;
-;	Called with the kernel mapped, mid interrupt and on the IRQ stack
+;	At the point we fire we are back on the user stack and logically
+;	speaking have just finished the interrupt. If the low byte was
+;	corrupt we assume the worst and just blow the process away
 ;
 null_pointer_trap:
-	ld a, #0xC3
+	call map_kernel_di
+	ld a, #0xC3		; Repair
 	ld (0), a
-	ld hl, #11		; SIGSEGV
+	ld hl, #9		; SIGKILL (take no prisoners here)
 trap_signal:
 	push hl
-	ld hl, (U_DATA__U_PTAB);
+	ld hl,(_udata + U_DATA__U_PTAB)
+	ld de, #P_TAB__P_PID_OFFSET
+	add hl,de
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	inc hl
+	push de
         call _ssig
-        pop hl
-        pop hl
-	ret
-
-
+	; Now fall into pre-emption from which we will not return
 ;
 ;	Pre-emption. We need to get off the interrupt stack, switch task
 ;	and clean up the IRQ state carefully
@@ -492,17 +540,22 @@ preemption:
 	call map_restore
 
 	ld hl, (istack_switched_sp)
-	ld (U_DATA__U_SYSCALL_SP), hl
+	ld (_udata + U_DATA__U_SYSCALL_SP), hl
 
 	ld sp, #kstack_top	; We don't pre-empt in a syscall
 				; so this is fine
+.ifeq CPU_Z180
+	ld a,(_irqvector)
+	or a
+	jr nz, intret2
+.endif
 	ld hl, #intret2
 	push hl
 	reti			; We have now 'left' the interrupt
 				; and the controllers have seen the
 				; reti M1 cycle. However we still
 				; have DI set
-
+	di			; see undocumented Z80 notes on RETI
 	;
 	; We are now on the syscall stack (which is fine, we don't
 	; pre-empt mid syscall so therefore it is free.  We will now
@@ -511,43 +564,55 @@ preemption:
 	; hence the need to reti
 
 	;
-intret2:call map_kernel
-
+intret2:call map_kernel_di
 	;
 	; Semantically we are doing a null syscall for pre-empt. We need
 	; to record ourselves as in a syscall so we can't be recursively
 	; pre-empted when switchout re-enables interrupts.
 	;
 	ld a, #1
-	ld (U_DATA__U_INSYS), a
+	ld (_udata + U_DATA__U_INSYS), a
+	;
+	; Check for signals
+	;
+	call _chksigs
 	;
 	; Process status is offset 0
 	;
-	ld hl, (U_DATA__U_PTAB)
+	ld hl, (_udata + U_DATA__U_PTAB)
+	ld a,#P_RUNNING
+	cp (hl)
+	jr nz, not_running
 	ld (hl), #P_READY
-	call _switchout
+	inc hl
+	set #PFL_BATCH,(hl)
+not_running:
+	call _platform_switchout
 	;
 	; We are no longer in an interrupt or a syscall
 	;
 	xor a
-	ld (U_DATA__U_ININTERRUPT), a
-	ld (U_DATA__U_INSYS), a
+	ld (_udata + U_DATA__U_ININTERRUPT), a
+	ld (_udata + U_DATA__U_INSYS), a
 	;
 	; We have been rescheduled, remap ourself and go back to user
 	; space via signal handling
 	;
-	call map_process_always	; Get our user mapping back
+	call map_process_always_di ; Get our user mapping back
 
 
 	; We were pre-empted but have now been rescheduled
 	; User stack
-	ld sp, (U_DATA__U_SYSCALL_SP)
-	ld a, (U_DATA__U_CURSIG)
+	ld sp, (_udata + U_DATA__U_SYSCALL_SP)
+	ld a, (_udata + U_DATA__U_CURSIG)
 	or a
 	call nz, deliver_signals_2
 	;
 	; pop the stack and go
 	;
+	.ifne Z80_MMU_HOOKS
+	call mmu_user
+	.endif
 	jr interrupt_pop
 
 ;
@@ -648,27 +713,94 @@ _out:
 	push bc
 	jp (hl)
 
-_in:
+_out16:
 	pop hl
 	pop bc
+	pop de
+	push de
 	push bc
-	push hl
+	out (c),e
+	jp (hl)
+
+;
+;	Use z88dk_fastcall for in.
+;
+_in16:
+	ld b,h
+_in:
+	ld c,l
 	in l, (c)
 	ret
 
 ;
-;	Enable interrupts
+;	Deal with all the NMOS Z80 bugs and the buggy emulators by
+;	simply tracing our own interrupt status. It's cheaper this way
+;	but does mean any code that is using di and friends directly needs
+;	to be a lot more careful. We can also make irqflags_t 8bit and
+;	fastcall the irqrestore later on FIXME
 ;
 ___hard_ei:
+	xor a
+	ld (_int_disabled),a
 	ei
 	ret
 
-;
-;	Pull in the CPU specific workarounds
-;
+___hard_di:
+	ld hl,#_int_disabled
+	di
+	ld a,(hl)
+	ld (hl),#1
+	ld l,a
+	ret
 
-.ifeq CPU_NMOS_Z80
-	.include "lowlevel-z80-nmos.s"
-.else
-	.include "lowlevel-z80-cmos.s"
-.endif
+___hard_irqrestore:
+	pop de
+	pop hl
+	push hl
+	push de
+	di
+	ld a,l
+	ld (_int_disabled),a
+	or a
+	ret nz
+	ei
+	ret
+
+	.area _CONST
+
+_sys_stubs:
+	jp unix_syscall_entry
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+
+	.area _DATA
+
+_sys_cpu:
+	.db 0
+_sys_cpu_feat:
+	.db 0
+
+	.area _DISCARD
+
+_set_cpu_type:
+	ld h,#2		; Assume Z80
+	xor a
+	dec a
+	daa
+	jr c,is_z80
+	ld h,#6		; Nope Z180
+is_z80:
+	ld l,#1		; 8080 family
+	ld (_sys_cpu),hl	; Write cpu and cpu feat
+	ret

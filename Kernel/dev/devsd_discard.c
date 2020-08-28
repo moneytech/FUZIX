@@ -20,6 +20,8 @@
 #include <stdbool.h>
 #include <blkdev.h>
 
+#ifdef CONFIG_SD
+
 /****************************************************************************/
 /* Code in this file is used only once, at startup, so we want it to live   */
 /* in the DISCARD segment. sdcc only allows us to specify one segment for   */
@@ -36,7 +38,7 @@ void sd_init_drive(void)
 {
     blkdev_t *blk;
     unsigned char csd[16], n;
-    uint8_t card_type;
+    uint_fast8_t card_type;
 
     kprintf("SD drive %d: ", sd_drive);
     card_type = sd_spi_init();
@@ -76,13 +78,14 @@ void sd_init_drive(void)
 
 int sd_spi_init(void)
 {
-    unsigned char n, cmd, card_type, ocr[4];
+    uint_fast8_t n, cmd, card_type;
+    unsigned char ocr[4];
     timer_t timer;
 
 	/* Initialising SD cards is pretty horrible; they aren't sane SPI devices.
 	 * There's a good flowchart of the state machine and some docs here:
 	 *
-	 * http://elm-chan.org/docs/mmc/gx1/sdinit.png
+	 * http://elm-chan.org/docs/mmc/ima/sdinit.png
 	 * http://elm-chan.org/docs/mmc/mmc_e.html
 	 */
 
@@ -137,3 +140,5 @@ int sd_spi_init(void)
 
     return CT_NONE; /* failed */
 }
+
+#endif

@@ -12,7 +12,7 @@ DSRCS = ../dev/devdw.c
 
 ASRCS = crt0.s coco2.s ide.s usermem.s sdc.s
 ASRCS += bootstrap.s bootstrap_sdc.s #bootstrap_dw.s
-ASRCS += tricks.s commonmem.s drivewire.s video.s
+ASRCS += tricks.s commonmem.s ../dev/drivewire/drivewire.s video.s
 
 COBJS = $(CSRCS:.c=$(BINEXT))
 CIOBJS = $(CISRCS:.c=$(BINEXT))
@@ -58,12 +58,13 @@ image:
 	crt0.o bootstrap.o commonmem.o coco2.o discard.o ../simple.o \
 	../start.o ../version.o ../lowlevel-6809.o \
 	tricks.o main.o ../timer.o ../kdata.o devices.o \
-	drivewire.o devdw.o mini_ide.o mini_ide_discard.o ide.o \
+	../dev/drivewire/drivewire.o devdw.o mini_ide.o mini_ide_discard.o ide.o \
 	../devio.o ../filesys.o ../process.o ../inode.o ../syscall_fs.o \
 	../syscall_proc.o ../syscall_other.o ../mm.o ../swap.o \
 	../tty.o ../devsys.o ../usermem.o usermem.o ../syscall_fs2.o \
 	../syscall_exec16.o devtty.o libc.o ../vt.o video.o  ../syscall_fs3.o \
 	../font8x8.o devsdc.o sdc.o
+	../tools/lw-checkmap ../fuzix.map
 	../tools/decb-image <../fuzix.bin fuzix.img
 	dd if=fuzix.img of=fuzix.rom bs=1024 skip=48 count=16
 	dd if=fuzix.img of=fuzix.ide bs=256 skip=26 count=102
@@ -74,7 +75,7 @@ image:
 	crt0.o bootstrap_sdc.o commonmem.o coco2.o discard.o ../simple.o \
 	../start.o ../version.o ../lowlevel-6809.o \
 	tricks.o main.o ../timer.o ../kdata.o devices.o \
-	drivewire.o devdw.o mini_ide.o mini_ide_discard.o ide.o \
+	../dev/drivewire/drivewire.o devdw.o mini_ide.o mini_ide_discard.o ide.o \
 	../devio.o ../filesys.o ../process.o ../inode.o ../syscall_fs.o \
 	../syscall_proc.o ../syscall_other.o ../mm.o ../swap.o \
 	../tty.o ../devsys.o ../usermem.o usermem.o ../syscall_fs2.o \

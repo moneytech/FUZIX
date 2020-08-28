@@ -746,7 +746,7 @@ int do_argvcmd(int cmd_id)
 
 void build_headers(void)
 {
-	char buffer[5][80];
+	static char buffer[5][80];
 	int strno = 0, stroff = 0;
 	int last_ch = 0, ch, in_quote = 0;
 
@@ -1085,7 +1085,7 @@ int main(int argc, char **argv)
 	}
 
 	if (find_page(manname, mansect) < 0) {
-		if (mansect > 0)
+		if (mansect != NULL)
 			fprintf(stderr,
 				"No entry for %s in section %s of the manual.\n",
 				manname, mansect);

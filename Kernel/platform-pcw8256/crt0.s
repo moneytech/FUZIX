@@ -13,12 +13,12 @@
 	        .area _HEAP
 	        ; note that areas below here may be overwritten by the heap at runtime, so
 	        ; put initialisation stuff in here
-	        .area _INITIALIZER
-		.area _FONT
 	        .area _GSINIT
 	        .area _GSFINAL
-	        .area _COMMONMEM
 		.area _DISCARD
+	        .area _INITIALIZER
+		.area _FONT
+	        .area _COMMONMEM
 
         	; imported symbols
         	.globl _fuzix_main
@@ -30,14 +30,15 @@
 	        .globl l__DISCARD
 		.globl s__COMMONMEM
 		.globl l__COMMONMEM
-		.globl s__INITIALIZER
 	        .globl kstack_top
 		.globl start
+
+		.globl _int_disabled
 
 	        ; startup code
 	        .area _CODE
 ;
-;	We have 0x88 bytes before the standard UZI start point, everyone
+;	We have 0x88 bytes before the standard FUZIX start point, everyone
 ;	breathe in
 ;
 ;	Once the first loader block is called we are called via RST 0 each
@@ -108,6 +109,9 @@ font8:		.db 	0xf8, 0xf8, 0xf8, 0xf8, 0xf8, 0xf8, 0x00, 0x00
 ; bank 5 and the OS is loaded into banks 0-2
 ;
 start:
+		; Joyce tracing on
+;	        ld a,#0x80
+;		.dw 0xfeed
 		ld sp, #kstack_top
 		;
 		;	Move the common into place (our build tool
@@ -139,6 +143,9 @@ start:
 		ld bc, #l__DATA - 1
 		ld (hl), #0
 		ldir
+
+		ld a,#1
+		ld (_int_disabled),a
 
 		call init_early
 		call init_hardware

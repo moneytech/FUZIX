@@ -5,38 +5,78 @@
 #include <netdev.h>
 
 #if defined(CONFIG_LARGE_IO_DIRECT)
-#define read_direct(flag)		(!udata.u_sysio)
+#define read_direct(dev, flag)		(!udata.u_sysio && CONFIG_LARGE_IO_DIRECT(dev))
 #elif (NBUFS >= 32)
-#define read_direct(flag)		(flag & O_DIRECT)
+#define read_direct(dev, flag)		(flag & O_DIRECT)
 #endif
 
 /* This assumes it's called once before we do I/O. That's wrong and we
    need to integrate this into the I/O loop, but when we do it changes
-   how we handle the psleep_flags bit */
-static uint8_t pipewait(inoptr ino, uint8_t flag)
+   how we handle the psleep_flags bit. Pipes wrap before 64k so we can
+   shorten the check */
+static uint8_t wait_pipe_read(inoptr ino, uint_fast8_t flag)
 {
-        while(ino->c_node.i_size == 0) {
+        while((uint16_t)ino->c_node.i_size == 0) {
                 if (ino->c_writers == 0 || psleep_flags(ino, flag)) {
                         udata.u_count = 0;
                         return 0;
                 }
         }
-	udata.u_count = min(udata.u_count, ino->c_node.i_size);
+	udata.u_count = min(udata.u_count, LOWORD(ino->c_node.i_size));
         return 1;
 }
 
+/* Wait for our pipe to become writable. We must have enough space and
+   a reader */
+static uint8_t wait_pipe_write(inoptr ino, uint_fast8_t flag)
+{
+	while (LOWORD(ino->c_node.i_size) > 8 * BLKSIZE) {
+		if (ino->c_readers == 0) {	/* No readers */
+			udata.u_done = (usize_t)-1;
+			udata.u_error = EPIPE;
+			ssig(udata.u_ptab, SIGPIPE);
+			return 1;
+		}
+		/* Sleep if pipe full */
+		if (psleep_flags(ino, flag))
+		        return 1;
+	}
+	return 0;
+}
+/* We need this because SDCC otherwise makes a right hash of it */
+static uint16_t uoff(void)
+{
+	return BLKOFF((uint16_t)udata.u_offset);
+}
+
+uint16_t umove(uint16_t n)
+{
+	udata.u_offset += n;
+	udata.u_count -= n;
+	udata.u_done += n;
+	udata.u_base += n;
+	return udata.u_done;
+}
+
+static uint16_t mapcalc(inoptr ino, usize_t *size, uint_fast8_t m)
+{
+	*size = min(udata.u_count, BLKSIZE - uoff());
+	return bmap(ino, udata.u_offset >> BLKSHIFT, m);
+}
+
 /* Writei (and readi) need more i/o error handling */
-void readi(inoptr ino, uint8_t flag)
+void readi(regptr inoptr ino, uint_fast8_t flag)
 {
 	usize_t amount;
-	usize_t toread;
 	blkno_t pblk;
-	unsigned char *bp;
+	bufptr bp;
 	uint16_t dev;
 	bool ispipe;
 
 	dev = ino->c_dev;
 	ispipe = false;
+	udata.u_done = 0;
+
 	switch (getmode(ino)) {
 	case MODE_R(F_DIR):
 	case MODE_R(F_REG):
@@ -52,13 +92,13 @@ void readi(inoptr ino, uint8_t flag)
 
         case MODE_R(F_SOCK):
 #ifdef CONFIG_NET
-                udata.u_count = sock_read(ino, flag);
+                udata.u_done = sock_read(ino, flag);
                 break;
 #endif
 	case MODE_R(F_PIPE):
 		ispipe = true;
 		/* This bit really needs to be inside the loop for pipe cases */
-		if (!pipewait(ino, flag))
+		if (!wait_pipe_read(ino, flag))
 		        break;
 		goto loop;
 
@@ -66,13 +106,13 @@ void readi(inoptr ino, uint8_t flag)
 		dev = *(ino->c_node.i_addr);
 
 	      loop:
-		toread = udata.u_count;
-		while (toread) {
-			amount = min(toread, BLKSIZE - BLKOFF(udata.u_offset));
-			pblk = bmap(ino, udata.u_offset >> BLKSHIFT, 1);
+		while (udata.u_count) {
+			pblk = mapcalc(ino, &amount, 1);
 
-#if defined(read_direct)
-			if (!ispipe && pblk != NULLBLK && amount == BLKSIZE && read_direct(flag) && bfind(dev, pblk) == 0) {
+#if !defined(read_direct)
+			bp = NULL;
+#else
+			if (pblk != NULLBLK && (bp = bfind(dev, pblk)) == NULL && !ispipe && amount == BLKSIZE && read_direct(major(dev), flag)) {
 				/* we can transfer direct from disk to the userspace buffer */
 				/* FIXME: allow for async queued I/O here. We want
 				   an API something like breadasync() that either
@@ -93,34 +133,32 @@ void readi(inoptr ino, uint8_t flag)
 				/* we transfer through the buffer pool */
 				if (pblk == NULLBLK)
 					bp = zerobuf();
-				else
+				else if (bp == NULL)
 					bp = bread(dev, pblk, 0);
-
-				uputsys(bp + BLKOFF(udata.u_offset), amount);
-
+				if (bp == NULL)
+					break;
+				uputblk(bp, uoff(), amount);
 				brelse(bp);
 			}
 			/* Bletch */
 #if defined(__M6809__)
                         gcc_miscompile_workaround();
-#endif                        
-			udata.u_base += amount;
-			udata.u_offset += amount;
-			if (ispipe && udata.u_offset >= 18 * BLKSIZE)
+#endif
+			umove(amount);
+			if (ispipe && LOWORD(udata.u_offset) >= 18 * BLKSIZE)
 				udata.u_offset = 0;
-			toread -= amount;
 			if (ispipe) {
 				ino->c_node.i_size -= amount;
 				wakeup(ino);
 			}
 		}
+		/* Compute return value */
+		if (udata.u_done == 0 && udata.u_error)
+			udata.u_done = (usize_t) -1;
 		break;
 
 	case MODE_R(F_CDEV):
-		udata.u_count = cdread(ino->c_node.i_addr[0], flag);
-
-		if (udata.u_count != (usize_t)-1)
-			udata.u_offset += udata.u_count;
+		udata.u_done = cdread(ino->c_node.i_addr[0], flag);
 		break;
 
 	default:
@@ -128,89 +166,74 @@ void readi(inoptr ino, uint8_t flag)
 	}
 }
 
-
-
-void writei(inoptr ino, uint8_t flag)
+void writei(regptr inoptr ino, uint_fast8_t flag)
 {
 	usize_t amount;
-	usize_t towrite;
-	unsigned char *bp;
-	bool ispipe;
+	bufptr bp;
+	bool ispipe = false;
 	blkno_t pblk;
 	uint16_t dev;
 
 	dev = ino->c_dev;
+	udata.u_done = 0;
 
 	switch (getmode(ino)) {
 
 	case MODE_R(F_BDEV):
 		dev = *(ino->c_node.i_addr);
-	case MODE_R(F_DIR):
-	case MODE_R(F_REG):
-		ispipe = false;
-		towrite = udata.u_count;
 		goto loop;
 
 #ifdef CONFIG_NET
 	case MODE_R(F_SOCK):
-        	udata.u_count = sock_write(ino, flag);
+		udata.u_done = sock_write(ino, flag);
 		break;
 #endif
 	case MODE_R(F_PIPE):
 		ispipe = true;
-		/* FIXME: this will hang if you ever write > 16 * BLKSIZE
-		   in one go - needs merging into the loop */
-		while ((towrite = udata.u_count) > (16 * BLKSIZE) - 
-					ino->c_node.i_size) {
-			if (ino->c_readers == 0) {	/* No readers */
-				udata.u_count = (usize_t)-1;
-				udata.u_error = EPIPE;
-				ssig(udata.u_ptab, SIGPIPE);
-				return;
-			}
-			/* Sleep if empty pipe */
-			if (psleep_flags(ino, flag))
-			        return;
-		}
-		/* Sleep if empty pipe */
-		goto loop;
 
+	case MODE_R(F_DIR):
+	case MODE_R(F_REG):
 	      loop:
+	      	flag = flag & O_SYNC ? 2 : 1;
 
-		while (towrite) {
-			amount = min(towrite, BLKSIZE - BLKOFF(udata.u_offset));
+		while (udata.u_count) {
+			if (ispipe) {
+				/* Sleep if empty pipe */
+				if (wait_pipe_write(ino, flag))
+					return;
+			}
+			pblk = mapcalc(ino, &amount, 0);
 
-                        if (udata.u_offset >> BLKOVERSIZE) {
+                        if (HIBYTE32(udata.u_offset) & BLKOVERSIZE32) {
                                 udata.u_error = EFBIG;
                                 ssig(udata.u_ptab, SIGXFSZ);
                                 break;
                         }
 
-			if ((pblk =
-			     bmap(ino, udata.u_offset >> BLKSHIFT,
-				  0)) == NULLBLK)
+			if (pblk == NULLBLK)
 				break;	/* No space to make more blocks */
 
 			/* If we are writing an entire block, we don't care
 			 * about its previous contents
 			 */
 			bp = bread(dev, pblk, (amount == BLKSIZE));
+			if (bp == NULL)
+				break;
 
-			ugetsys(bp + BLKOFF(udata.u_offset), amount);
+			ugetblk(bp, uoff(), amount);
 
-			/* FIXME: O_SYNC */
-			bawrite(bp);
+			/* O_SYNC */
+			if (bfree(bp, flag))
+				break;
 
-			udata.u_base += amount;
-			udata.u_offset += amount;
+			umove(amount);
 			if (ispipe) {
-				if (udata.u_offset >= 18 * 512)
+				if (LOWORD(udata.u_offset) >= 18 * 512)
 					udata.u_offset = 0;
 				ino->c_node.i_size += amount;
 				/* Wake up any readers */
 				wakeup(ino);
 			}
-			towrite -= amount;
 		}
 
 		/* Update size if file grew */
@@ -220,24 +243,24 @@ void writei(inoptr ino, uint8_t flag)
 				ino->c_flags |= CDIRTY;
 			}
 		}
+		/* Compute return value */
+		if (udata.u_done == 0 && udata.u_error)
+			udata.u_done = (usize_t) -1;
 		break;
 
 	case MODE_R(F_CDEV):
-		udata.u_count = cdwrite(ino->c_node.i_addr[0], flag);
-
-		if (udata.u_count != -1)
-			udata.u_offset += udata.u_count;
+		udata.u_done = cdwrite(ino->c_node.i_addr[0], flag);
 		break;
 	default:
 		udata.u_error = ENODEV;
 	}
 }
 
-int16_t doclose(uint8_t uindex)
+int16_t doclose(uint_fast8_t uindex)
 {
 	int8_t oftindex;
 	struct oft *oftp;
-	inoptr ino;
+	regptr inoptr ino;
 	uint16_t flush_dev = NO_DEVICE;
 	uint8_t m;
 
@@ -273,10 +296,10 @@ int16_t doclose(uint8_t uindex)
 	return (0);
 }
 
-inoptr rwsetup(bool is_read, uint8_t * flag)
+inoptr rwsetup(bool is_read, uint_fast8_t * flag)
 {
 	inoptr ino;
-	struct oft *oftp;
+	regptr struct oft *oftp;
 
 	udata.u_sysio = false;	/* I/O to user data space */
 	udata.u_base = (unsigned char *) udata.u_argn1;	/* buf */
@@ -300,6 +323,7 @@ inoptr rwsetup(bool is_read, uint8_t * flag)
 		oftp->o_ptr = ino->c_node.i_size;
 	/* Initialize u_offset from file pointer */
 	udata.u_offset = oftp->o_ptr;
+	i_lock(ino);
 	return (ino);
 }
 
@@ -341,7 +365,9 @@ int dev_openi(inoptr *ino, uint16_t flag)
 
 void sync(void)
 {
-	inoptr ino;
+	regptr inoptr ino;
+	regptr struct mount *m;
+	bufptr buf;
 
 	/* Write out modified inodes */
 
@@ -349,10 +375,70 @@ void sync(void)
 		if (ino->c_refs > 0 && (ino->c_flags & CDIRTY)) {
 			wr_inode(ino);
 			ino->c_flags &= ~CDIRTY;
-			/* WRS: also call d_flush(ino->c_dev) here? */
 		}
-
-        /* This now also indirectly does the superblocks as they
-           are buffers that are pinned */
+	for (m = fs_tab; m < fs_tab + NMOUNTS; m++) {
+		if (m->m_dev != NO_DEVICE &&
+			m->m_fs.s_fmod != FMOD_CLEAN) {
+			/* GO_CLEAN means write a CLEAN to the media */
+			if (m->m_fs.s_fmod == FMOD_GO_CLEAN)
+				m->m_fs.s_fmod = FMOD_CLEAN;
+			buf = bread(m->m_dev, 1, 1);
+			if (buf) {
+				blkfromk(&m->m_fs, buf, 0, sizeof(struct filesys));
+				bfree(buf, 2);
+			}
+		}
+	}
+	/* WRS: also call d_flush(dev) here for each dirty dev ? */
 	bufsync();		/* Clear buffer pool */
 }
+
+#ifdef CONFIG_BLOCK_SLEEP
+
+/* ptab is an array so won't exceed 64K so this crude cast works nicely */
+
+static void i_lock(inoptr i)
+{
+	if (i->lock == (uint16_t)udata.u_ptab)
+		panic(LOCKLOCK);
+	while(i->i_lock)
+		psleep_nosig(i);
+	i->i_lock = (uint16_t)udata.u_ptab;
+}
+
+static void i_unlock(inoptr i)
+{
+	i_islocked(i);
+	i->i_lock = 0;
+	pwakeup_nosig(i);
+}
+
+static void i_unlock_deref(inoptr i)
+{
+	i->i_lock = 0;
+	i_deref(i);
+}
+
+void i_islocked(inoptr i)
+{
+	if (i->lock != (uint16_t)udata.u_ptab)
+		panic(IUNLOCK);
+}
+
+inoptr n_open_lock(char *uname, inoptr *parent)
+{
+	inoptr i = n_open(uname, parent);
+	if (i)
+		i_lock(i);
+	return i;
+}
+
+inoptr getinode_lock(uint8_t uindex)
+{
+	inoptr i = getinode(uindex);
+	if (i)
+		i_lock(i);
+	return i;
+}
+
+#endif

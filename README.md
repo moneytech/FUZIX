@@ -1,3 +1,5 @@
+[![Build Status][travis-image]][travis-url]
+
 **FuzixOS**: Because Small Is Beautiful
 
 This is the initial public tree for the FuzixOS project. It is not yet useful although you can build and boot it and run
@@ -23,14 +25,12 @@ images should follow in time.
 	with Minix style chmem and efficient use of bank allocations.
 * Support for multiple processes via hard disk or non mappable RAM
     drive switching (as per UZI, UZIX).
-* The ability to run single tasking on small devices, for bring up
-    and for standalone tool execution
 * Support for "real" swapping combined with banked memory.
 * Proper sane off_t and lseek
 * Normal dev_t
 * 30 character filenames
 * Proper sane time_t
-* System 5 signals (half baked)
+* System 5 signals
 * Posix termios (does all the original UZI tty did but much can be added)
 * Blocking on carrier for terminals
 * Optimisations to avoid bogus uarea copying compared to UZI180
@@ -40,9 +40,8 @@ images should follow in time.
 	O_NDELAY, O_CLOEXEC, F_SETFL, F_DUPFD etc
 * Address validation checks on all syscall copies
 * Builds with a modern ANSI C compiler (SDCC)
-* Kernel boots to userspace on both 6502 (bitrotted), 68000, 6809, MSP430 and Z80/Z180
-* Core code can be built for 6502, 6809, 68000, 8086, MSP430, pdp11 and Z80/Z180 so should
-  be far more portable
+* Kernel boots to userspace on 6303, 6502, 65C816, 68000, 6803, 6809, 8080, 8085, MSP430 (bitrotted) and Z80/Z180
+* Core code can be built for 6303, 6502, 65C816, 68000, 6803, 6809, 8080, 8085, 8086, MSP430, pdp11, rabbit r2k/r3k and Z80/Z180 so should be far more portable
 * Core architecture designed to support building and maintaining
 	multiple target machines without forking each one
 * Helpers to make many bits of implementation wrappers to core code
@@ -58,8 +57,6 @@ images should follow in time.
 
 ## What do the UZI branches have that FUZIX has not yet integrated
 
-* Minimal TCP/IP (UZIX 2.0). Unfortunately the original TCP was never
-released openly.
 * Symbolic links (UZIX)
 * Various clever fusions of syscalls that may save a few bytes
 	(UZIX)
@@ -73,7 +70,7 @@ friends, while UMZIX has a neat unified "make anything" function.
 
 ## What Key Features Are Missing Still
 
-* ptrace, ulimit
+* ptrace, most of ulimit
 * root reserved disk blocks
 * banked executables
 * TCP/IP (in progress)
@@ -85,44 +82,12 @@ friends, while UMZIX has a neat unified "make anything" function.
 
 ## Tool Issues
 
-* No useful 8086 compiler option (started work on pcc 8086 but help
-	needed, coherent may provide a suitable cc but that also needs work)
 * 6809 gcc and cc65 don't have long long 64bit (for sane time_t)
 * SDCC can generate ROMmable binaries but not banked ones (hack fixes done)
-* SDCC has no register passing function call support, and for some
-	stuff it really shows
-* SDCC generates quite bloaty small applications. Needs research
-	on how to improve.
 * None of the above have an O88 style common sequence compressor
 * CC65 can't handle larger objects on stack, and lacks float support
+* We need a 'proper' 65C816 C compiler
+* ACK 8080 lacks floating point support
 
-## Platforms
-
-* Amstrad NC100/NC200 - real hardware sanity check
-* Amstrad PCW8256 - fork and memory management needs some fixing up
-* Atari 520ST - 68000 core code build test only at this point
-* Dragon Nx32 - Dragon with Tormod's memory expansion card (SPInx)
-* Epson PX4/4Plus - WIP port to a very early Z80 laptop
-* Memotech MTX512 - boots to userspace in emulation, should run on real hardware
-* MSP430FR5969 - decent functionality; see Documentation/MSP430FR5969.md
-* MSX - basic functionality
-* Multicomp09 - decent functionality. This is an FPGA 6809 system extended from the design by Grant Searle.
-* N8VEM-MarkIV - Supports the on-board RTC, RS232, RS422, IDE and SD interfaces, on the
-ECB expansion bus only the PropIO V2 serial port is supported at this time.
-* P112 - Supports the floppy disk controller, ESCC serial ports, and optional G-IDE interface.
-* SocZ80 - 128MHz extreme Z80 FPGA machine. Boots to shell, drivers need work
-* Tandy COCO2 - minimal platform (64K machine needed, not enough room to run bigger apps)
-* Tandy COCO2 - with COCO-SDC or Cloud9 IDE/Cartridge
-* Tandy COCO3 - boots to userspace and supports drivewire
-* TGL6502 - Test 6502ish environment
-* TRS80 - boots to userspace in emulation, swapping, floppy and hard disc done
-* V65 - 6502 emulation/debug platform. Being used for bring up
-* V68 - 68K emulation/debug platform. Being used for bring up
-* Z80Pack - used as a dev and test environment for both large swapping
-	multiprocess and for small single tasking
-* Zeta v2 - initial port running to user space
-* ZX Spectrum 128K - can boot to shell but needs swap debugging to get further
-
-Various other platforms are partly filled out to sanity check assumptions
-and start making progress on them. The main need there is now to tackle all
-the billion different ways of interfacing the floppy controllers.
+[travis-image]: https://travis-ci.org/EtchedPixels/FUZIX.png?branch=master
+[travis-url]: https://travis-ci.org/EtchedPixels/FUZIX

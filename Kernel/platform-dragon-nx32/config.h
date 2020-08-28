@@ -6,8 +6,6 @@
 #undef CONFIG_PROFIL
 /* Multiple processes in memory at once */
 #define CONFIG_MULTI
-/* Single tasking - for now while we get it booting */
-#undef CONFIG_SINGLETASK
 /* Pure swap */
 #undef CONFIG_SWAP_ONLY
 
@@ -16,14 +14,15 @@
 #define MAP_SIZE 0x7F00U
 #define CONFIG_BANKS	1
 /* And swapping */
-#define SWAPDEV 2049		/* DriveWire drive 1 */
+#define SWAPDEV (swap_dev)	/* Dynamic swap */
 #define SWAP_SIZE   0x40	/* 32K in 512 byte blocks */
 #define SWAPBASE    0x8000	/* We swap the lot, including stashed uarea */
 #define SWAPTOP     0xFF00	/* so it's a round number of 256 byte sectors */
 #define MAX_SWAPS   32
+#define CONFIG_DYNAMIC_SWAP
 
 /* Permit large I/O requests to bypass cache and go direct to userspace */
-#define CONFIG_LARGE_IO_DIRECT
+#define CONFIG_LARGE_IO_DIRECT(x)	1
 
 /* Reclaim the discard space for buffers */
 #define CONFIG_DYNAMIC_BUFPOOL
@@ -32,18 +31,24 @@
 #define SD_DRIVE_COUNT	1	/* Could be higher with multiple CS used */
 #define CONFIG_SD               /* enable if SD  interface present */
 #define CONFIG_IDE              /* enable if IDE interface present */
+#define CONFIG_SCSI             /* enable if SCSI interface present */
+
+#define CONFIG_GPT
 
 /* Video terminal, not a serial tty */
 #define CONFIG_VT
+#define CONFIG_VT_MULTI
 #define CONFIG_FONT8X8
 /* Vt definitions */
-#define VT_WIDTH	32
-#define VT_HEIGHT	24
-#define VT_RIGHT	31
-#define VT_BOTTOM	23
+#define VT_RIGHT	(vt_tright[curtty])
+#define VT_BOTTOM	(vt_tbottom[curtty])
 #define VT_INITIAL_LINE	0
+#define MAX_VT 4
 
 #define VIDEO_BASE	0x0400
+#define VC_BASE		0x1C00
+
+#define CRT9128_BASE	0xFF7C
 
 #define TICKSPERSEC 50   /* Ticks per second */
 /* FIXME: This will move once we put the display in the kernel bank and
@@ -60,7 +65,7 @@
 #define CMDLINE	NULL	  /* Location of root dev name */
 
 /* Device parameters */
-#define NUM_DEV_TTY 4
+#define NUM_DEV_TTY 7
 #define NDEVS    2        /* Devices 0..NDEVS-1 are capable of being mounted */
                           /*  (add new mountable devices to beginning area.) */
 #define TTYDEV   BOOT_TTY /* Device used by kernel for messages, panics */
@@ -72,8 +77,12 @@
 
 #define DW_VSER_NUM 1     /* No of Virtual Serial Ports */
 #define DW_VWIN_NUM 1     /* No of Virtual Window Ports */
-#define DW_MIN_OFF  3     /* Minor number offset */
+#define DW_MIN_OFF  6     /* Minor number offset = first DW ttyX */
 
 /* Remember to update platform-dragon-nx32/kernel.defs to match */
 
 extern void platform_discard(void);
+
+#define platform_copyright()		/* for now */
+
+#define BOOTDEVICENAMES "hd#,fd#"

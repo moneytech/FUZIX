@@ -11,7 +11,7 @@
    control as a single UART is switched multiple ways including for
    the fd */
 
-char tbuf1[TTYSIZ];
+static char tbuf1[TTYSIZ];
 
 uint8_t vtattr_cap;
 
@@ -56,6 +56,10 @@ int tty_carrier(uint8_t minor)
 {
     minor;
     return 1;
+}
+
+void tty_data_consumed(uint8_t minor)
+{
 }
 
 /*

@@ -101,7 +101,7 @@ void newfunc_typed(int storage, char *n, int type)
     if (symbol->offset == FUNCTION)
             multidef(n);
     symbol->offset = FUNCTION;
-    output_string(n);
+    output_label_name(n);
     output_label_terminator();
     newline();
     gen_prologue();
@@ -175,7 +175,7 @@ int doAnsiArguments(void) {
         if (type != -1) {
             doLocalAnsiArgument(type);
         } else {
-            error("wrong number args");
+            error("wrong number of args");
             break;
         }
         if (match(",")) {
@@ -196,6 +196,10 @@ void doLocalAnsiArgument(int type) {
     if (match("*")) {
         identity = POINTER;
     } else {
+        if (type == STRUCT) {
+            error("cannot pass struct");
+            return;
+        }
         identity = VARIABLE;
         if (type == VOID)
             return;

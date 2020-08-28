@@ -1,26 +1,28 @@
 /* We have an RTC */
 #define CONFIG_RTC
+/* And we can read ToD from it */
+#define CONFIG_RTC_FULL
+/* And it's fast */
+#define CONFIG_RTC_INTERVAL 10
 /* Enable to make ^Z dump the inode table for debug */
-#define CONFIG_IDUMP
+#undef CONFIG_IDUMP
 /* Enable to make ^A drop back into the monitor */
 #undef CONFIG_MONITOR
 /* Profil syscall support (not yet complete) */
-#define CONFIG_PROFIL
+#undef CONFIG_PROFIL
 /* Multiple processes in memory at once */
 #define CONFIG_MULTI
-/* Single tasking */
-#undef CONFIG_SINGLETASK
-/* CP/M emulation */
-#undef CONFIG_CPM_EMU
 /* Fixed banking */
 #define CONFIG_BANK_FIXED
 /* 8 60K banks, 1 is kernel */
 #define MAX_MAPS	7
 #define MAP_SIZE	0xF000U
-/* Level 2 feature set */
-#define CONFIG_LEVEL_2
+
 /* Networking (not usable yet but for debug/development) */
 #define CONFIG_NET
+#define CONFIG_NET_NATIVE
+/* Read processes and big I/O direct into process space */
+#define CONFIG_LARGE_IO_DIRECT(x)	1
 
 /* Banks as reported to user space */
 #define CONFIG_BANKS	1
@@ -28,7 +30,7 @@
 #define TICKSPERSEC 100   /* Ticks per second */
 #define PROGBASE    0x0000  /* also data base */
 #define PROGLOAD    0x0100  /* also data base */
-#define PROGTOP     0xED00  /* Top of program, base of U_DATA copy */
+#define PROGTOP     0xEE00  /* Top of program, base of U_DATA copy */
 #define PROC_SIZE   60	  /* Memory needed per process */
 
 #define SWAP_SIZE   0x78 	/* 60K in blocks (we actually don't need the low 256) */
@@ -45,11 +47,14 @@
 #define CMDLINE	NULL	  /* Location of root dev name */
 
 /* Device parameters */
-#define NUM_DEV_TTY 3
+#define NUM_DEV_TTY 4
 
 #define TTYDEV   BOOT_TTY /* Device used by kernel for messages, panics */
 #define SWAPDEV  (256 + 1)  /* Device for swapping. (z80pack drive J) */
-#define NBUFS    10       /* Number of block buffers */
+#define NBUFS    6	  /* Number of block buffers */
 #define NMOUNTS	 4	  /* Number of mounts at a time */
 
 #define platform_discard()
+#define platform_copyright()
+
+#define BOOTDEVICENNAMES "hd#,fd#"

@@ -9,13 +9,22 @@
 
 #undef  DEBUG			/* UNdefine to delete debug code sequences */
 
-__sfr __at 0x2F tty_debug2;
+extern void set_active_vt(uint8_t curtty);
+extern void set_visible_vt(uint8_t curtty);
+
+__sfr __at 0x2F tty_debug;
 __sfr __at 0xAA kbd_row_set;
 __sfr __at 0xA9 kbd_row_read;
 
-char tbuf1[TTYSIZ];
-char tbuf2[TTYSIZ];
+static uint8_t tbuf1[TTYSIZ];
+static uint8_t tbuf2[TTYSIZ];
+static uint8_t tbuf3[TTYSIZ];
+static uint8_t tbuf4[TTYSIZ];
+static uint8_t tbuf5[TTYSIZ];
 
+uint8_t curtty;
+uint8_t inputtty;
+static struct vt_switch ttysave[NUM_DEV_TTY];
 struct vt_repeat keyrepeat;
 uint8_t vtattr_cap;
 static uint8_t kbd_timer;
@@ -23,53 +32,97 @@ static uint8_t kbd_timer;
 struct s_queue ttyinq[NUM_DEV_TTY + 1] = {	/* ttyinq[0] is never used */
 	{NULL, NULL, NULL, 0, 0, 0},
 	{tbuf1, tbuf1, tbuf1, TTYSIZ, 0, TTYSIZ / 2},
-	{tbuf2, tbuf2, tbuf2, TTYSIZ, 0, TTYSIZ / 2}
+	{tbuf2, tbuf2, tbuf2, TTYSIZ, 0, TTYSIZ / 2},
+	{tbuf3, tbuf3, tbuf3, TTYSIZ, 0, TTYSIZ / 2},
+	{tbuf4, tbuf4, tbuf4, TTYSIZ, 0, TTYSIZ / 2},
+};
+
+static tcflag_t console_mask[4] = {
+	_ISYS,
+	_OSYS,
+	_CSYS,
+	_LSYS
+};
+
+tcflag_t termios_mask[NUM_DEV_TTY + 1] = {
+	0,
+	_CSYS,
+	_CSYS,
+	_CSYS,
+	_CSYS
 };
 
 uint8_t keyboard[11][8];
 uint8_t shiftkeyboard[11][8];
 
-/* tty1 is the screen tty2 is the debug port */
+/* tty1 to tty4 is the screen */
 
 /* Output for the system console (kprintf etc) */
-void kputchar(char c)
+static void
+kputc(uint_fast8_t minor, uint_fast8_t c)
 {
 	/* Debug port for bringup */
-	if (c == '\n')
-		tty_putc(2, '\r');
-	tty_putc(2, c);
+	tty_debug = c;
+	tty_putc(minor, c);
 }
 
-/* Both console and debug port are always ready */
-ttyready_t tty_writeready(uint8_t minor)
+void kputchar(uint_fast8_t c)
+{
+	if (c == '\n')
+		kputc(minor(TTYDEV), '\r');
+	kputc(minor(TTYDEV), c);
+}
+
+/* All tty are always ready */
+ttyready_t tty_writeready(uint_fast8_t minor)
 {
 	minor;
+	// tty are ready to write
 	return TTY_READY_NOW;
 }
 
-void tty_putc(uint8_t minor, unsigned char c)
+void vtexchange()
 {
-	minor;
-
-	vtoutput(&c, 1);
-
-	tty_debug2 = c;
+	vt_save(&ttysave[curtty]);
+	cursor_off();
+	set_visible_vt(inputtty);
+	cursor_on(ttysave[inputtty].cursory, ttysave[inputtty].cursorx);
 }
 
-int tty_carrier(uint8_t minor)
+
+void tty_putc(uint_fast8_t minor, uint_fast8_t c)
+{
+	irqflags_t irq;
+
+	irq = di();
+	if (curtty != minor -1) {
+		vt_save(&ttysave[curtty]);
+		curtty = minor - 1;
+		vt_load(&ttysave[curtty]);
+		set_active_vt(curtty);
+	}
+	vtoutput(&c, 1);
+	irqrestore(irq);
+}
+
+int tty_carrier(uint_fast8_t minor)
 {
 	minor;
 	return 1;
 }
 
-void tty_setup(uint8_t minor)
+void tty_data_consumed(uint_fast8_t minor)
+{
+}
+
+void tty_setup(uint_fast8_t minor, uint_fast8_t flags)
 {
 	minor;
 
-	/* setup termios to use msx keys */
-	ttydata[1].termios.c_cc[VERASE] = KEY_BS;
-	ttydata[1].termios.c_cc[VSTOP] = KEY_STOP;
-	ttydata[1].termios.c_cc[VSTART] = KEY_STOP;
+	/* setup termios to use msx keys: FIXME */
+	ttydata[minor].termios.c_cc[VERASE] = KEY_BS;
+	ttydata[minor].termios.c_cc[VSTOP] = KEY_STOP;
+	ttydata[minor].termios.c_cc[VSTART] = KEY_STOP;
 }
 
 uint8_t keymap[11];
@@ -122,9 +175,17 @@ static void keydecode(void)
 		return;
 	}
 
-	if (keymap[6] & 3 )	/* shift or control */
+	if (keymap[6] & 3 ) {	/* shift or control */
 		c = shiftkeyboard[keybyte][keybit];
-	else
+		/* VT switcher */
+		if (c == KEY_F1 || c == KEY_F2 || c == KEY_F3 || c == KEY_F4) {
+			if (inputtty != c - KEY_F1) {
+				inputtty = c - KEY_F1;
+				vtexchange();	/* Exchange the video and backing buffer */
+			}
+			return;
+		}
+	} else
 		c = keyboard[keybyte][keybit];
 
 	if (keymap[6] & 2) {	/* control */
@@ -137,10 +198,10 @@ static void keydecode(void)
 
 	/* TODO: function keys (F1-F10), graph, code */
 
-	vt_inproc(1, c);
+	vt_inproc(inputtty +1, c);
 }
 
-void update_keyboard()
+void update_keyboard(void)
 {
 	int n;
 	uint8_t r;
@@ -171,11 +232,10 @@ void kbd_interrupt(void)
 	}
 }
 
-void tty_sleeping(uint8_t minor)
+void tty_sleeping(uint_fast8_t minor)
 {
     minor;
 }
 
 /* This is used by the vt asm code, but needs to live in the kernel */
 uint16_t cursorpos;
-

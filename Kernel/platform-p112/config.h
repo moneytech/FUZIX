@@ -6,14 +6,12 @@
 #undef CONFIG_PROFIL
 /* Multiple processes in memory at once */
 #define CONFIG_MULTI
-/* Single tasking */
-#undef CONFIG_SINGLETASK
 /* CP/M emulation */
 #undef CONFIG_CPM_EMU
 /* Fixed banking: 8 x 64K banks, top 4KB is shared with kernel */
 #define CONFIG_BANK_FIXED
 /* Permit large I/O requests to bypass cache and go direct to userspace */
-#define CONFIG_LARGE_IO_DIRECT
+#define CONFIG_LARGE_IO_DIRECT(x)	1
 /* 8 60K banks, 1 is kernel */
 #define MAX_MAPS	16
 #define MAP_SIZE	PROGTOP /* 0xF000 breaks pagemap_realloc() / exec() */
@@ -50,6 +48,7 @@
 
 /* We have a DS1302, we can read the time of day from it */
 #define CONFIG_RTC
+#define CONFIG_RTC_FULL
 #define CONFIG_RTC_INTERVAL 30 /* deciseconds between reading RTC seconds counter */
 
 /* Memory backed devices */
@@ -65,3 +64,5 @@
 
 /* We have the P112 floppy controller */
 #define CONFIG_P112_FLOPPY
+
+#define platform_copyright()

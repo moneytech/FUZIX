@@ -80,21 +80,27 @@ arg_t _getegid(void)
 /*******************************************
 setuid (uid)                     Function 25        ?
 int uid;
+
+FIXME: Next API break switch to setreuid/setregid
 ============================================
-Set User ID Number (UID) of Process.  Must
-be SuperUser or owner, else Error (EPERM).
-********************************************/
+*/
+
 #define uid (uint16_t)udata.u_argn
 
 arg_t _setuid(void)
 {
-	if (super() || udata.u_ptab->p_uid == uid) {
-		udata.u_ptab->p_uid = uid;
+	/* We must be super user or setting to either our real or effective
+	   uid */
+	if (super() || udata.u_ptab->p_uid == uid || udata.u_euid == uid) {
+		/* If our effective id is root we set both. This is the
+		  _POSIX_SAVED_IDS behaviiour */
+		if (udata.u_euid == 0)
+			udata.u_ptab->p_uid = uid;
 		udata.u_euid = uid;
-		return (0);
+		return 0;
 	}
 	udata.u_error = EPERM;
-	return (-1);
+	return -1;
 }
 
 #undef uid
@@ -104,21 +110,26 @@ arg_t _setuid(void)
 /*******************************************
 setgid (gid)                     Function 26        ?
 int gid;
+
+FIXME: Next API break switch to setreuid/setregid
 ============================================
-Set Group ID Number (GID).  Must be Super-
-User or in Group to Set, else Error (EPERM).
-********************************************/
+*/
+
 #define gid (int16_t)udata.u_argn
 
 arg_t _setgid(void)
 {
-	if (super() || udata.u_gid == gid) {
-		udata.u_gid = gid;
+	/* We must be superuser, have the group in question is our effective
+	   ore real group, or be a member of that group */
+	if (super() || udata.u_gid == gid || udata.u_egid == gid 
+		|| in_group(gid)) {
+		if (udata.u_egid == 0)
+			udata.u_gid = gid;
 		udata.u_egid = gid;
-		return (0);
+		return 0;
 	}
 	udata.u_error = EPERM;
-	return (-1);
+	return -1;
 }
 
 #undef gid
@@ -189,7 +200,7 @@ arg_t _stime(void)
 times (buf)                      Function 42        ?
 char *buf;
 ********************************************/
-#define buf (char *)udata.u_argn
+#define buf (uint8_t *)udata.u_argn
 
 arg_t _times(void)
 {
@@ -197,7 +208,7 @@ arg_t _times(void)
 
 	irq = di();	
 
-	uput(&udata.u_utime, buf, 4 * sizeof(clock_t));
+	uput(&udata.u_ptab->p_utime, buf, 4 * sizeof(clock_t));
 	uput(&ticks, buf + 4 * sizeof(clock_t),
 	     sizeof(clock_t));
 
@@ -227,10 +238,17 @@ arg_t _brk(void)
 	   can keep it portable */
 
 	if (addr >= brk_limit()) {
-		kprintf("%d: out of memory\n", udata.u_ptab->p_pid);
+		kprintf("%d: out of memory by %d\n", udata.u_ptab->p_pid,
+			addr - brk_limit());
 		udata.u_error = ENOMEM;
 		return -1;
 	}
+#if (PROGBASE > 0)
+	if (addr < PROGBASE) {
+		udata.u_error = EINVAL;
+		return -1;
+	}
+#endif
 	/* If we have done a break that gives us more room we must zero
 	   the extra as we no longer guarantee it is clear already */
 	if (addr > udata.u_break)
@@ -274,25 +292,15 @@ int options;
 
 arg_t _waitpid(void)
 {
-	ptptr p;
+	regptr ptptr p;
 	int retval;
+	uint8_t found;
 
-	if (statloc && !valaddr((char *) statloc, sizeof(int))) {
+	if (statloc && !valaddr((uint8_t *) statloc, sizeof(int))) {
 		udata.u_error = EFAULT;
 		return (-1);
 	}
 
-	/* FIXME: move this scan into the main loop and also error
-	   on a complete loop finding no matchi for pid */
-	/* See if we have any children. */
-	for (p = ptab; p < ptab_end; ++p) {
-		if (p->p_status && p->p_pptr == udata.u_ptab
-		    && p != udata.u_ptab)
-			goto ok;
-	}
-	udata.u_error = ECHILD;
-	return (-1);
-      ok:
 	if (pid == 0)
 		pid = -udata.u_ptab->p_pgrp;
 	/* Search for an exited child; */
@@ -302,30 +310,36 @@ arg_t _waitpid(void)
 			udata.u_error = EINTR;
 			return -1;
 		}
+		/* Each scan we check that we have a child, if we have a child
+		   then all is good. If not then we ECHILD out */
+		found = 0;
 		for (p = ptab; p < ptab_end; ++p) {
-			if (p->p_pptr == udata.u_ptab &&
-				(pid == -1 || p->p_pid == pid ||
-					p->p_pgrp == -pid)) {
-				if (p->p_status == P_ZOMBIE) {
-					if (statloc)
-						uputi(p->p_exitval, statloc);
-					retval = p->p_pid;
-					p->p_status = P_EMPTY;
+			if (p->p_status && p->p_pptr == udata.u_ptab) {
+				found = 1;
+				if (pid == -1 || p->p_pid == pid ||
+					p->p_pgrp == -pid) {
+					if (p->p_status == P_ZOMBIE) {
+						if (statloc)
+							uputi(p->p_exitval, statloc);
+						retval = p->p_pid;
+						p->p_status = P_EMPTY;
 
-					/* Add in child's time info.  It was stored on top */
-					/* of p_priority in the childs process table entry. */
-					/* FIXME: make these a union so we don't do type
-					   punning and break strict aliasing */
-					udata.u_cutime += ((clock_t *)&p->p_priority)[0];
-					udata.u_cstime += ((clock_t *)&p->p_priority)[1];
-					return retval;
-				}
-				if (p->p_event && (options & WUNTRACED)) {
-					retval = (uint16_t)p->p_event << 8 | _WSTOPPED;
-					p->p_event = 0;
-					return retval;
+						/* Add in child's cumulative time info */
+						udata.u_ptab->p_cutime += p->p_utime + p->p_cutime;
+						udata.u_ptab->p_cstime += p->p_stime + p->p_cstime;
+						return retval;
+					}
+					if (p->p_event && (options & WUNTRACED)) {
+						retval = (uint16_t)p->p_event << 8 | _WSTOPPED;
+						p->p_event = 0;
+						return retval;
+					}
 				}
 			}
+		}
+		if (!found) {
+			udata.u_error = ECHILD;
+			return -1;
 		}
 		/* Nothing yet, so wait */
 		if (options & WNOHANG)
@@ -381,8 +395,13 @@ arg_t _fork(void)
 	/*
 	 * We're going to run our child process next, so mark this process as
 	 * being ready to run
+	 *
+	 * FIXME: push this down into dofork
 	 */
+#ifndef CONFIG_PARENT_FIRST
 	udata.u_ptab->p_status = P_READY;
+#endif
+
 	/*
 	 * Kick off the new process (the bifurcation happens inside here, we
 	 * *MAY* returns in both the child and parent contexts, however in a
@@ -393,11 +412,11 @@ arg_t _fork(void)
 	r = dofork(new_process);
 
 #ifdef DEBUG
-	kprintf("Dofork %x (n %x)returns %d\n", udata.u_ptab,
+	kprintf("Dofork %p (n %p)returns %d\n", udata.u_ptab,
 		new_process, r);
 	kprintf("udata.u_page %d p_page %d\n", udata.u_page,
 		udata.u_ptab->p_page);
-	kprintf("parent %x\n", udata.u_ptab->p_pptr);
+	kprintf("parent %p\n", udata.u_ptab->p_pptr);
 #endif
 	// if we fail this returns -1
 	if (r == -1) {
@@ -405,11 +424,12 @@ arg_t _fork(void)
 		pagemap_free(new_process);
 		new_process->p_status = P_EMPTY;
 		udata.u_error = ENOMEM;
+		/* FIXME: we don't know for sure whether the error occurred
+		   before or after makeproc: see bug 686 */
 		nproc--;
 		nready--;
 	}
 	irqrestore(irq);
-
 	return r;
 }
 
@@ -425,11 +445,16 @@ uint16_t t;
 
 arg_t _pause(void)
 {
+	/* Make sure we don't set a timeout, have it expire then sleep */
+	irqflags_t irq = di();
 	/* 0 is a traditional "pause", n is a timeout for doing
 	   sleep etc without ugly alarm hacks */
-	if (t)
+	if (t) {
 		udata.u_ptab->p_timeout = t + 1;
+		ptimer_insert();
+	}
 	psleep(0);
+	irqrestore(irq);
 	/* Were we interrupted ? */
 	if (!t || udata.u_ptab->p_timeout > 1) {
 		udata.u_error = EINTR;
@@ -454,29 +479,34 @@ arg_t _signal(void)
 {
 	int16_t retval;
 	irqflags_t irq;
+	struct sigbits *sb = udata.u_ptab->p_sig;
 
 	if (sig < 1 || sig >= NSIGS) {
 		udata.u_error = EINVAL;
 		goto nogood;
 	}
+	if (sig > 15)
+		sb++;
 
 	irq = di();
 
 	if (func == SIG_IGN) {
 		if (sig != SIGKILL && sig != SIGSTOP)
-			udata.u_ptab->p_ignored |= sigmask(sig);
+			sb->s_ignored |= sigmask(sig);
 	} else {
-		if (func != SIG_DFL && !valaddr((char *) func, 1)) {
+		if (func != SIG_DFL && !valaddr((uint8_t *) func, 1)) {
 			udata.u_error = EFAULT;
 			goto nogood;
 		}
-		udata.u_ptab->p_ignored &= ~sigmask(sig);
+		sb->s_ignored &= ~sigmask(sig);
 	}
 	retval = (arg_t) udata.u_sigvec[sig];
 	if (sig != SIGKILL && sig != SIGSTOP)
 		udata.u_sigvec[sig] = func;
+	/* Force recalculation of signal pending in the syscall return path */
+	recalc_cursig();
 	irqrestore(irq);
-
+	
 	return (retval);
 
 nogood:
@@ -491,20 +521,25 @@ sigdisp(sig, disp)		 Function 59
 int16_t sig;
 int16_t disp;
 *******************************************/
-#define sig (int16_t)udata.u_argn
-#define disp (int16_t)udata.u_argn1
+#define sig (uint16_t)udata.u_argn
+#define disp (uint16_t)udata.u_argn1
 
 /* Implement sighold/sigrelse */
 arg_t _sigdisp(void)
 {
+	struct sigbits *sb = udata.u_ptab->p_sig;
 	if (sig < 1 || sig >= NSIGS || sig == SIGKILL || sig == SIGSTOP) {
 		udata.u_error = EINVAL;
 		return -1;
 	}
+	if (sig > 15)
+		sb++;
 	if (disp == 1)
-		udata.u_ptab->p_held |= sigmask(sig);
+		sb->s_held |= sigmask(sig);
 	else
-		udata.u_ptab->p_held &= ~sigmask(sig);
+		sb->s_held &= ~sigmask(sig);
+	/* Force recalculation of signal pending in the syscall return path */
+	recalc_cursig();
 	return 0;
 }
 
@@ -521,7 +556,7 @@ int16_t sig;
 
 arg_t _kill(void)
 {
-	ptptr p;
+	regptr ptptr p;
 	int f = 0, s = 0;
 
 	if (sig < 0 || sig >= NSIGS) {
@@ -561,18 +596,19 @@ arg_t _kill(void)
 
 
 /*******************************************
-_alarm (secs)                    Function 38
-uarg_t secs;
+_alarm (dsecs)                    Function 38
+uarg_t dsecs;
 ********************************************/
-#define secs (uarg_t)udata.u_argn
+#define dsecs (uarg_t)udata.u_argn
 
 arg_t _alarm(void)
 {
 	arg_t retval;
 
-	retval = udata.u_ptab->p_alarm / 10;
-	udata.u_ptab->p_alarm = secs * 10;
-	return (retval);
+	retval = udata.u_ptab->p_alarm;
+	udata.u_ptab->p_alarm = dsecs;
+	ptimer_insert();
+	return retval;
 }
 
 #undef secs
@@ -601,8 +637,7 @@ getpgrp (void)                    Function 61
 
 arg_t _getpgrp(void)
 {
-	udata.u_ptab->p_pgrp = udata.u_ptab->p_pid;
-	return (0);
+	return udata.u_ptab->p_pgrp;
 }
 
 /*******************************************
@@ -611,7 +646,6 @@ _sched_yield (void)              Function 62
 
 arg_t _sched_yield(void)
 {
-	if (nready > 1)
-		switchout();
+	switchout();
 	return 0;
 }

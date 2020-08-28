@@ -24,7 +24,7 @@ static arg_t chdiroot_op(inoptr ino, inoptr * p)
   chdir (dir)                      Function 10
   char *dir;
  ********************************************/
-#define dir (char *)udata.u_argn
+#define dir (uint8_t *)udata.u_argn
 
 arg_t _chdir(void)
 {
@@ -59,7 +59,7 @@ arg_t _fchdir(void)
   chroot (dir)                      Function 46
   char *dir;
  ********************************************/
-#define dir (char *)udata.u_argn
+#define dir (uint8_t *)udata.u_argn
 
 arg_t _chroot(void)
 {
@@ -81,15 +81,14 @@ arg_t _chroot(void)
   int16_t mode;
   int16_t dev;
  ********************************************/
-#define name (char *)udata.u_argn
-#define mode (int16_t)udata.u_argn1
-#define dev  (int16_t)udata.u_argn2
+#define name (uint8_t *)udata.u_argn
+#define mode (uint16_t)udata.u_argn1
+#define dev  (uint16_t)udata.u_argn2
 
 arg_t _mknod(void)
 {
 	inoptr ino;
 	inoptr parent;
-	char fname[FILENAME_LEN + 1];
 
 	udata.u_error = 0;
 
@@ -107,8 +106,7 @@ arg_t _mknod(void)
 		return (-1);
 	}
 
-	filename(name, fname);
-	ino = newfile(parent, fname);
+	ino = newfile(parent, lastname);
 	if(!ino)
 		goto nogood3;	/* parent inode is derefed in newfile. SN */
 
@@ -118,7 +116,7 @@ arg_t _mknod(void)
 	setftime(ino, A_TIME | M_TIME | C_TIME);
 	wr_inode(ino);
 
-	i_deref(ino);
+	i_unlock_deref(ino);
 	return (0);
 
       nogood:
@@ -137,8 +135,8 @@ arg_t _mknod(void)
   char  *path;
   int16_t mode;
  ********************************************/
-#define path (char *)udata.u_argn
-#define mode (int16_t)udata.u_argn1
+#define path (uint8_t *)udata.u_argn
+#define mode (uint16_t)udata.u_argn1
 
 arg_t _access(void)
 {
@@ -204,17 +202,17 @@ static arg_t chmod_op(inoptr ino)
   char  *path;
   int16_t mode;
  ********************************************/
-#define path (char *)udata.u_argn
+#define path (uint8_t *)udata.u_argn
 
 arg_t _chmod(void)
 {
 	inoptr ino;
 	int ret;
 
-	if (!(ino = n_open(path, NULLINOPTR)))
+	if (!(ino = n_open_lock(path, NULLINOPTR)))
 		return (-1);
 	ret = chmod_op(ino);
-	i_deref(ino);
+	i_unlock_deref(ino);
 	return ret;
 }
 
@@ -230,11 +228,14 @@ arg_t _chmod(void)
 arg_t _fchmod(void)
 {
 	inoptr ino;
+	int ret;
 
-	if ((ino = getinode(fd)) == NULLINODE)
+	if ((ino = getinode_lock(fd)) == NULLINODE)
 		return (-1);
 
-	return chmod_op(ino);
+	ret = chmod_op(ino);
+	i_unlock_deref(ino);
+	return ret;
 }
 
 #undef fd
@@ -244,15 +245,27 @@ arg_t _fchmod(void)
 
 static int chown_op(inoptr ino)
 {
-	if ((ino->c_node.i_uid != udata.u_euid ||
-	        (group != udata.u_gid &&  !in_group(group))) && esuper())
-		return (-1);
 	if (ino->c_flags & CRDONLY) {
 		udata.u_error = EROFS;
 		return -1;
 	}
-	ino->c_node.i_uid = owner;
-	ino->c_node.i_gid = group;
+	/* Owner change must be superuser rights */
+	if (owner != -1) {
+		if (esuper())
+			return -1;
+		ino->c_node.i_uid = owner;
+	/* owner = group = -1 is a no-op */
+	} else if (group == -1)
+		return 0;
+	/* Group change */
+	if (group != -1) {
+		/* We must be in the target group (and file owner) */
+		if ((ino->c_node.i_uid != udata.u_euid ||
+			(group != udata.u_egid && !in_group(group))) && esuper())
+			return -1;
+		ino->c_node.i_gid = group;
+	}
+	ino->c_node.i_mode &= ~(SET_GID|SET_UID);
 	setftime(ino, C_TIME);
 	return 0;
 }
@@ -266,24 +279,24 @@ static int chown_op(inoptr ino)
   int  owner;
   int  group;
  ********************************************/
-#define path (char *)udata.u_argn
+#define path (uint8_t *)udata.u_argn
 
 arg_t _chown(void)
 {
 	inoptr ino;
 	int ret;
 
-	if (!(ino = n_open(path, NULLINOPTR)))
+	if (!(ino = n_open_lock(path, NULLINOPTR)))
 		return (-1);
 	ret = chown_op(ino);
-	i_deref(ino);
+	i_unlock_deref(ino);
 	return ret;
 }
 
 #undef path
 
 /*******************************************
-  fchown (path, owner, group)       Function 50
+  fchown (fd, owner, group)       Function 50
   int fd;
   int  owner;
   int  group;
@@ -293,10 +306,13 @@ arg_t _chown(void)
 arg_t _fchown(void)
 {
 	inoptr ino;
+	int ret;
 
-	if ((ino = getinode(fd)) == NULLINODE)
+	if ((ino = getinode_lock(fd)) == NULLINODE)
 		return (-1);
-	return chown_op(ino);
+	ret = chown_op(ino);
+	i_unlock(ino);
+	return ret;
 }
 
 #undef fd
@@ -307,15 +323,15 @@ arg_t _fchown(void)
   char *file;
   char *buf;
  ********************************************/
-#define file (char *)udata.u_argn
-#define buf (char *)udata.u_argn1
+#define file (uint8_t *)udata.u_argn
+#define buf (uint8_t *)udata.u_argn1
 
 arg_t _utime(void)
 {
-	inoptr ino;
+	regptr inoptr ino;
 	time_t t[2];
 
-	if (!(ino = n_open(file, NULLINOPTR)))
+	if (!(ino = n_open_lock(file, NULLINOPTR)))
 		return (-1);
 	if (ino->c_flags & CRDONLY) {
 		udata.u_error = EROFS;
@@ -339,12 +355,12 @@ arg_t _utime(void)
 	ino->c_node.i_atime = t[0].low;
 	ino->c_node.i_mtime = t[1].low;
 	setftime(ino, C_TIME);
-	i_deref(ino);
+	i_unlock_deref(ino);
 	return (0);
 out:
 	udata.u_error = EPERM;
 out2:
-	i_deref(ino);
+	i_unlock_deref(ino);
 	return -1;
 }
 
@@ -392,26 +408,26 @@ arg_t _acct(void)
 
 #undef fd
 
-/* Special system call returns super-block of given filesystem
- * for users to determine free space, etc.  Should be replaced
- * with a sync() followed by a read of block 1 of the device.
- */
 /*******************************************
-  getfsys (dev, buf)               Function 22
-  int16_t  dev;
-  struct filesys *buf;
- ********************************************/
-#define dev (uint16_t)udata.u_argn
-#define buf (struct filesys *)udata.u_argn1
+  statfs(path, buf)               Function 22
+  char *path;
 
-arg_t _getfsys(void)
+  Wrapped by the various C library translators to standard
+  APIs
+ ********************************************/
+#define path (char *)udata.u_argn
+#define buf (uint8_t *)udata.u_argn1
+
+arg_t _statfs(void)
 {
-        struct mount *m = fs_tab_get(dev);
-	if (m == NULL || m->m_dev == NO_DEVICE) {
-		udata.u_error = ENXIO;
-		return (-1);
-	}
-	return uput((char *) m->m_fs, (char *) buf, sizeof(struct filesys));
+	inoptr ino;
+	struct mount *m;
+
+	if (!(ino  = n_open(path, NULLINOPTR)))
+		return -1;
+        m = fs_tab_get(ino->c_dev);
+        uputw(m->m_flags, buf + sizeof(struct filesys));
+	return uput((uint8_t *) &m->m_fs, buf, sizeof(struct filesys));
 }
 
 #undef dev

@@ -11,7 +11,6 @@
  *	- Parity
  *	- Various misc minor flags
  *	- Software Flow control
- *	- Don't echo EOF char ?
  *
  *	Add a small echo buffer to each tty
  */
@@ -22,7 +21,7 @@ struct tty ttydata[NUM_DEV_TTY + 1];	/* ttydata[0] is not used */
 static uint16_t tty_select;		/* Fast path if no selects, could do with being per tty ? */
 
 /* Might be worth tracking tty minor <> inode for performance FIXME */
-static void tty_selwake(uint8_t minor, uint16_t event)
+static void tty_selwake(uint_fast8_t minor, uint16_t event)
 {
 	if (tty_select) {
 		/* 2 is the tty devices */
@@ -33,24 +32,24 @@ static void tty_selwake(uint8_t minor, uint16_t event)
 #define tty_selwake(a,b)	do {} while(0)
 #endif
 
-int tty_read(uint8_t minor, uint8_t rawflag, uint8_t flag)
+int tty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 {
-	usize_t nread;
-	unsigned char c;
+	uint_fast8_t c;
 	struct s_queue *q;
 	struct tty *t;
 
+	/* FIXME: fix race of timer versus the ptimer_insert to psleep_flags_io */
 	used(rawflag);
 	used(flag);			/* shut up compiler */
 
 	q = &ttyinq[minor];
 	t = &ttydata[minor];
-	nread = 0;
-	while (nread < udata.u_count) {
+
+	while (udata.u_done < udata.u_count) {
 		for (;;) {
 #ifdef CONFIG_LEVEL_2		
-                        if (jobcontrol_in(minor, t, &nread))
-				return nread;
+                        if (jobcontrol_in(minor, t))
+				return udata.u_done;
 #endif				
 		        if ((t->flag & TTYF_DEAD) && (!q->q_count))
 				goto dead;
@@ -62,60 +61,64 @@ int tty_read(uint8_t minor, uint8_t rawflag, uint8_t flag)
 				break;
 			}
 			if (!(t->termios.c_lflag & ICANON)) {
-			        uint8_t n = t->termios.c_cc[VTIME];
-			        if (n)
+			        uint_fast8_t n = t->termios.c_cc[VTIME];
+
+				if ((udata.u_done || !n) && udata.u_done >= t->termios.c_cc[VMIN])
+					goto out;
+				if (n) {
 			                udata.u_ptab->p_timeout = n + 1;
+			                ptimer_insert();
+				}
                         }
-			if (psleep_flags_io(q, flag, &nread))
-			        return nread;
+			if (psleep_flags_io(q, flag))
+			        goto out;
                         /* timer expired */
                         if (udata.u_ptab->p_timeout == 1)
                                 goto out;
 		}
 
-		++nread;
+		++udata.u_done;
 
 		/* return according to mode */
-		if (!(t->termios.c_lflag & ICANON)) {
-			if (nread >= t->termios.c_cc[VMIN])
-				break;
-		} else {
-			if (nread == 1 && (c == t->termios.c_cc[VEOF])) {
+		if (t->termios.c_lflag & ICANON) {
+			if (udata.u_done == 1 && (c == t->termios.c_cc[VEOF])) {
 				/* ^D */
-				nread = 0;
+				udata.u_done = 0;
 				break;
 			}
-			if (c == '\n')
+			if (c == '\n' || c == t->termios.c_cc[VEOL])
 				break;
 		}
 
 		++udata.u_base;
 	}
 out:
+	tty_data_consumed(minor);
 	wakeup(&q->q_count);
-	return nread;
+	return udata.u_done;
 
 dead:
         udata.u_error = ENXIO;
 	return -1;
 }
 
-int tty_write(uint8_t minor, uint8_t rawflag, uint8_t flag)
+int tty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 {
 	struct tty *t;
-	usize_t written = 0;
-	uint8_t c;
+	uint_fast8_t c;
 
 	used(rawflag);
-	used(flag);
+
+	if (!valaddr(udata.u_base, udata.u_count))
+		return -1;
 
 	t = &ttydata[minor];
 
-	while (udata.u_count-- != 0) {
+	while (udata.u_done != udata.u_count) {
 		for (;;) {	/* Wait on the ^S/^Q flag */
 #ifdef CONFIG_LEVEL_2		
-	                if (jobcontrol_out(minor, t, &written))
-				return written;
+	                if (jobcontrol_out(minor, t))
+				return udata.u_done;
 #endif				
 		        if (t->flag & TTYF_DEAD) {
 			        udata.u_error = ENXIO;
@@ -123,33 +126,45 @@ int tty_write(uint8_t minor, uint8_t rawflag, uint8_t flag)
 			}
 			if (!(t->flag & TTYF_STOP))
 				break;
-			if (psleep_flags_io(&t->flag, flag, &written))
-				return written;
+			if (psleep_flags_io(&t->flag, flag))
+				return udata.u_done;
 		}
+		/* We could optimize this significantly by 
+		   a) looping here if not sleeping rather than repeating all
+		   the checks except for STOP/DISCARD
+		   b) possibly batching for the case where tty never blocks
+		   if we have a way to report that. We could then batch except
+		   for conversions and also fast path in vt for 'normal char
+		   next char normal'
+		   c) look at hint/batching for ugetc into a local work buffer
+		*/
 		if (!(t->flag & TTYF_DISCARD)) {
 			if (udata.u_sysio)
 				c = *udata.u_base;
 			else
-				c = ugetc(udata.u_base);
+				c = _ugetc(udata.u_base);
 
 			if (t->termios.c_oflag & OPOST) {
-				if (c == '\n' && (t->termios.c_oflag & ONLCR))
-					tty_putc_wait(minor, '\r');
-				else if (c == '\r' && (t->termios.c_oflag & OCRNL))
+				if (c == '\n' && (t->termios.c_oflag & ONLCR)) {
+					if (tty_putc_maywait(minor, '\r', flag))
+						break;
+				} else if (c == '\r' && (t->termios.c_oflag & OCRNL))
 					c = '\n';
 			}
-			tty_putc_wait(minor, c);
+			if (tty_putc_maywait(minor, c, flag))
+				break;
 		}
 		++udata.u_base;
-		++written;
+		++udata.u_done;
 	}
-	return written;
+	return udata.u_done;
 }
 
 
-int tty_open(uint8_t minor, uint16_t flag)
+int tty_open(uint_fast8_t minor, uint16_t flag)
 {
 	struct tty *t;
+	irqflags_t irq;
 
 	if (minor > NUM_DEV_TTY) {
 		udata.u_error = ENODEV;
@@ -158,95 +173,103 @@ int tty_open(uint8_t minor, uint16_t flag)
 
 	t = &ttydata[minor];
 
-	/* Hung up but not yet cleared of users */
-	if (t->flag & TTYF_DEAD) {
-	        udata.u_error = ENXIO;
-	        return -1;
-        }
-
+	/*
+	 *	If the tty has users but is marked dead then we are still
+	 *	cleaning up from a carrier drop. If it didn't have users
+	 *	then this is fine.
+	 */
 	if (t->users) {
+		if (t->flag & TTYF_DEAD) {
+		        udata.u_error = ENXIO;
+		        return -1;
+	        }
 	        t->users++;
 	        return 0;
         }
-	tty_setup(minor);
+
+        t->flag &= ~TTYF_DEAD;
+
+	tty_setup(minor, 0);
+
+	/*
+	 *	Do not wait for carrier in these cases. If the port has
+	 *	no carrier tty_carrier always returns 1 so that hardware
+	 *	detail is abstracted
+	 */
 	if ((t->termios.c_cflag & CLOCAL) || (flag & O_NDELAY))
 		goto out;
 
-        /* FIXME: racy - need to handle IRQ driven carrier events safely */
+	/* Wait for carrier */
+	irq = di();
         if (!tty_carrier(minor)) {
-                if (psleep_flags(&t->termios.c_cflag, flag))
+		if (psleep_flags(&t->termios.c_cflag, flag)) {
+			irqrestore(irq);
                         return -1;
+		}
         }
-        /* Carrier spiked ? */
+        irqrestore(irq);
+        /* Carrier rose and then fell again during the open ? */
         if (t->flag & TTYF_DEAD) {
                 udata.u_error = ENXIO;
                 t->flag &= ~TTYF_DEAD;
                 return -1;
         }
- out:   t->users++;
+out:
+	/* Track users */
+	t->users++;
         return 0;
 }
 
 /* Post processing for a successful tty open */
-void tty_post(inoptr ino, uint8_t minor, uint16_t flag)
+void tty_post(inoptr ino, uint_fast8_t minor, uint16_t flag)
 {
         struct tty *t = &ttydata[minor];
         irqflags_t irq = di();
 
 	/* If there is no controlling tty for the process, establish it */
-	/* Disable interrupts so we don't endup setting up our control after
+	/* Disable interrupts so we don't end up setting up our control after
 	   the carrier drops and tries to undo it.. */
 	if (!(t->flag & TTYF_DEAD) && !udata.u_ptab->p_tty && !t->pgrp && !(flag & O_NOCTTY)) {
 		udata.u_ptab->p_tty = minor;
 		udata.u_ctty = ino;
 		t->pgrp = udata.u_ptab->p_pgrp;
-#ifdef DEBUG
-		kprintf("setting tty %d pgrp to %d for pid %d\n",
-		        minor, t->pgrp, udata.u_ptab->p_pid);
-#endif
 	}
 	irqrestore(irq);
 }
 
-int tty_close(uint8_t minor)
+int tty_close(uint_fast8_t minor)
 {
         struct tty *t = &ttydata[minor];
+        /* We only care about the final close */
         if (--t->users)
                 return 0;
 	/* If we are closing the controlling tty, make note */
 	if (minor == udata.u_ptab->p_tty) {
 		udata.u_ptab->p_tty = 0;
 		udata.u_ctty = NULL;
-#ifdef DEBUG
-		kprintf("pid %d loses controller\n", udata.u_ptab->p_pid);
-#endif
         }
 	t->pgrp = 0;
-        /* If we were hung up then the last opener has gone away */
+        /* If we were hung up then the last opener has gone away. This may
+           race but we also check in the open path */
         t->flag &= ~TTYF_DEAD;
-#ifdef DEBUG
-        kprintf("tty %d last close\n", minor);
-#endif
 	return (0);
 }
 
 /* If the group owner for the tty dies, the tty loses its group */
 void tty_exit(void)
 {
-        uint8_t t = udata.u_ptab->p_tty;
+        uint_fast8_t t = udata.u_ptab->p_tty;
         uint16_t *pgrp = &ttydata[t].pgrp;
         if (t && *pgrp == udata.u_ptab->p_pgrp && *pgrp == udata.u_ptab->p_pid)
                 *pgrp = 0;
 }
 
-int tty_ioctl(uint8_t minor, uarg_t request, char *data)
+int tty_ioctl(uint_fast8_t minor, uarg_t request, char *data)
 {				/* Data in User Space */
         struct tty *t;
+        uint_fast8_t waito = 0;
+        staticfast struct termios tm;
 
-	if (minor > NUM_DEV_TTY + 1) {
-		udata.u_error = ENODEV;
-		return -1;
-	}
         t = &ttydata[minor];
 
         /* Special case select ending after a hangup */
@@ -266,19 +289,27 @@ int tty_ioctl(uint8_t minor, uarg_t request, char *data)
 	switch (request) {
 	case TCGETS:
 		return uput(&t->termios, data, sizeof(struct termios));
-		break;
 	case TCSETSF:
 		clrq(&ttyinq[minor]);
 		/* Fall through for now */
 	case TCSETSW:
-		/* We don't have an output queue really so for now drop
-		   through */
+		waito = 1;
 	case TCSETS:
-		if (uget(data, &t->termios, sizeof(struct termios)) == -1)
+	{
+		tcflag_t mask = termios_mask[minor];
+		if (uget(data, &tm, sizeof(struct termios)) == -1)
 		        return -1;
-                tty_setup(minor);
+		memcpy(t->termios.c_cc, tm.c_cc, NCCS);
+		t->termios.c_iflag = tm.c_iflag;
+		t->termios.c_oflag = tm.c_oflag;
+		t->termios.c_cflag &= ~mask;
+		tm.c_cflag &= mask;
+		t->termios.c_cflag |= tm.c_cflag;
+		t->termios.c_lflag = tm.c_lflag;
+                tty_setup(minor, waito);
                 tty_selwake(minor, SELECT_IN|SELECT_OUT);
 		break;
+	}
 	case TIOCINQ:
 		return uput(&ttyinq[minor].q_count, data, 2);
 	case TIOCFLUSH:
@@ -354,14 +385,15 @@ int tty_ioctl(uint8_t minor, uarg_t request, char *data)
  * UZI180 - This routine is called from the raw Hardware read routine,
  * either interrupt or polled, to process the input character.  HFB
  */
-int tty_inproc(uint8_t minor, unsigned char c)
+uint_fast8_t tty_inproc(uint_fast8_t minor, uint_fast8_t c)
 {
-	unsigned char oc;
-	int canon;
-	uint8_t wr;
+	uint_fast8_t oc;
+	uint_fast8_t canon;
+	uint_fast8_t wr;
 	struct tty *t = &ttydata[minor];
 	struct s_queue *q = &ttyinq[minor];
 
+	/* This is safe as ICANON is in the low bits */
 	canon = t->termios.c_lflag & ICANON;
 
 	if (t->termios.c_iflag & ISTRIP)
@@ -375,7 +407,7 @@ int tty_inproc(uint8_t minor, unsigned char c)
 #endif
 #ifdef CONFIG_MONITOR
 	if (c == 0x01)		/* ^A */
-		trap_monitor();
+		platform_monitor();
 #endif
 
 	if (c == '\r' ){
@@ -384,6 +416,7 @@ int tty_inproc(uint8_t minor, unsigned char c)
 		if(t->termios.c_iflag & ICRNL)
 			c = '\n';
 	}
+	/* Q: should this be else .. */
 	if (c == '\n' && (t->termios.c_iflag & INLCR))
 		c = '\r';
 
@@ -400,10 +433,6 @@ sigout:
 			return 1;
 		}
 	}
-	if (c == t->termios.c_cc[VDISCARD]) {	/* ^O */
-	        t->flag ^= TTYF_DISCARD;
-		return 1;
-	}
 	if (t->termios.c_iflag & IXON) {
 		if (c == t->termios.c_cc[VSTOP]) {	/* ^S */
 		        t->flag |= TTYF_STOP;
@@ -417,6 +446,10 @@ sigout:
 		}
 	}
 	if (canon) {
+		if (c == t->termios.c_cc[VDISCARD]) {	/* ^O */
+		        t->flag ^= TTYF_DISCARD;
+			return 1;
+		}
 		if (c == t->termios.c_cc[VERASE]) {
 		        wr = ECHOE;
 		        goto eraseout;
@@ -433,7 +466,7 @@ sigout:
 	}
 
 	wr = insq(q, c);
-	if (wr)
+	if (wr && (!canon || c != t->termios.c_cc[VEOF]))
 		tty_echo(minor, c);
 	else
 		tty_putc(minor, '\007');	/* Beep if no more room */
@@ -460,19 +493,19 @@ eraseout:
 }
 
 /* called when a UART transmitter is ready for the next character */
-void tty_outproc(uint8_t minor)
+void tty_outproc(uint_fast8_t minor)
 {
 	wakeup(&ttydata[minor]);
 	tty_selwake(minor, SELECT_OUT);
 }
 
-void tty_echo(uint8_t minor, unsigned char c)
+void tty_echo(uint_fast8_t minor, uint_fast8_t c)
 {
 	if (ttydata[minor].termios.c_lflag & ECHO)
 		tty_putc_wait(minor, c);
 }
 
-void tty_erase(uint8_t minor)
+void tty_erase(uint_fast8_t minor)
 {
 	tty_putc_wait(minor, '\b');
 	tty_putc_wait(minor, ' ');
@@ -480,9 +513,12 @@ void tty_erase(uint8_t minor)
 }
 
 
-void tty_putc_wait(uint8_t minor, unsigned char c)
+uint_fast8_t tty_putc_maywait(uint_fast8_t minor, uint_fast8_t c, uint_fast8_t flag)
 {
-        uint8_t t;
+        uint_fast8_t t;
+
+        flag &= O_NDELAY;
+
 #ifdef CONFIG_DEV_PTY
 	if (minor >= PTY_OFFSET)
 		ptty_putc_wait(minor, c);
@@ -495,43 +531,79 @@ void tty_putc_wait(uint8_t minor, unsigned char c)
            The driver should return a value from the ttyready_t enum:
             1 (TTY_READY_NOW) -- send bytes now
             0 (TTY_READY_SOON) -- spinning may be useful
-           -1 (TTY_READY_LATER) -- blocked, don't spin (eg flow controlled) */
+           -1 (TTY_READY_LATER) -- blocked, don't spin (eg flow controlled)
+
+           FIXME: we can make tty_sleeping an add on to a hardcoded function using tty
+	   flags, and tty_outproc test it. Then only devices wanting to mask
+	   an actual IRQ need to care
+
+	*/
 	if (!udata.u_ininterrupt) {
-		while ((t = tty_writeready(minor)) != TTY_READY_NOW)
-			if (t != TTY_READY_SOON || need_reschedule()){
-				irqflags_t irq = di();
-				tty_sleeping(minor);
-				psleep(&ttydata[minor]);
-				irqrestore(irq);
+		while ((t = tty_writeready(minor)) != TTY_READY_NOW) {
+			if (chksigs()) {
+				udata.u_error = EINTR;
+				return 1;
 			}
+			if (t != TTY_READY_SOON || need_reschedule()){
+				irqflags_t irq;
+
+				if (flag) {
+					udata.u_error = EAGAIN;
+					return 1;
+				}
+				if (t != TTY_READY_SOON) {
+					irq = di();
+					tty_sleeping(minor);
+					psleep(&ttydata[minor]);
+					irqrestore(irq);
+				} else
+					/* Yield */
+					switchout();
+			}
+		}
 	}
 	tty_putc(minor, c);
+	return 0;
 }
 
-void tty_hangup(uint8_t minor)
+void tty_putc_wait(uint_fast8_t minor, uint_fast8_t ch)
+{
+	tty_putc_maywait(minor, ch, 0);
+}
+
+/*
+ *	This can occur in kernel or interrupt context. We therefore need
+ *	to be careful when we are racing open or close. If we race a close
+ *	the TTYF_DEAD gets set unnecessarily which is fine as open will
+ *	clean it up. If we race an open then open clears the flag early
+ *	and checks it before completion.
+ */
+void tty_hangup(uint_fast8_t minor)
 {
         struct tty *t = &ttydata[minor];
-        /* Kill users */
-        sgrpsig(t->pgrp, SIGHUP);
-        sgrpsig(t->pgrp, SIGCONT);
-        t->pgrp = 0;
-        /* Stop any new I/O with errors */
-        t->flag |= TTYF_DEAD;
-        /* Wake up read/write */
-        wakeup(&ttyinq[minor]);
-        /* Wake stopped stuff */
-        wakeup(&t->flag);
-        /* and deadflag will clear when the last user goes away */
-	tty_selwake(minor, SELECT_IN|SELECT_OUT|SELECT_EX);
+        if (t->users) {
+	        /* Kill users */
+	        sgrpsig(t->pgrp, SIGHUP);
+	        sgrpsig(t->pgrp, SIGCONT);
+	        t->pgrp = 0;
+	        /* Stop any new I/O with errors */
+	        t->flag |= TTYF_DEAD;
+	        /* Wake up read/write */
+	        wakeup(&ttyinq[minor]);
+	        /* Wake stopped stuff */
+	        wakeup(&t->flag);
+	        /* and deadflag will clear when the last user goes away */
+		tty_selwake(minor, SELECT_IN|SELECT_OUT|SELECT_EX);
+	}
 }
 
-void tty_carrier_drop(uint8_t minor)
+void tty_carrier_drop(uint_fast8_t minor)
 {
         if (ttydata[minor].termios.c_cflag & HUPCL)
                 tty_hangup(minor);
 }
 
-void tty_carrier_raise(uint8_t minor)
+void tty_carrier_raise(uint_fast8_t minor)
 {
 	wakeup(&ttydata[minor].termios.c_cflag);
 	tty_selwake(minor, SELECT_IN|SELECT_OUT);
@@ -545,32 +617,32 @@ void tty_carrier_raise(uint8_t minor)
 
 static uint8_t ptyusers[PTY_PAIR];
 
-int ptty_open(uint8_t minor, uint16_t flag)
+int ptty_open(uint_fast8_t minor, uint16_t flag)
 {
 	return tty_open(minor + PTY_OFFSET, flag);
 }
 
-int ptty_close(uint8_t minor)
+int ptty_close(uint_fast8_t minor)
 {
 	return tty_close(minor + PTY_OFFSET);
 }
 
-int ptty_write(uint8_t minor, uint8_t rawflag, uint8_t flag)
+int ptty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 {
 	return tty_write(minor + PTY_OFFSET, rawflag, flag);
 }
 
-int ptty_read(uint8_t minor, uint8_t rawflag, uint8_t flag)
+int ptty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 {
 	return tty_read(minor + PTY_OFFSET, rawflag, flag);
 }
 
-int ptty_ioctl(uint8_t minor, uint16_t request, char *data)
+int ptty_ioctl(uint_fast8_t minor, uint16_t request, char *data)
 {
 	return tty_ioctl(minor + PTY_OFFSET, rawflag, flag);
 }
 
-int pty_open(uint8_t minor, uint16_t flag)
+int pty_open(uint_fast8_t minor, uint16_t flag)
 {
 	int r = tty_open(minor + PTY_OFFSET, flag | O_NOCTTY | O_NDELAY);
 	if (r == 0) {
@@ -581,7 +653,7 @@ int pty_open(uint8_t minor, uint16_t flag)
 	return r;
 }
 
-int pty_close(uint8_t minor)
+int pty_close(uint_fast8_t minor)
 {
 	ptyusers[minor]--;
 	if (ptyusers[minor] == 0)
@@ -589,7 +661,7 @@ int pty_close(uint8_t minor)
 	return tty_close(minor + PTY_OFFSET);
 }
 
-int pty_write(uint8_t minor, uint8_t rawflag, uint8_t flag)
+int pty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 {
 	uint16_t nwritten;
 	minor += PTY_OFFSET;
@@ -612,7 +684,7 @@ int pty_write(uint8_t minor, uint8_t rawflag, uint8_t flag)
 	return nwritten;
 }
 
-int pty_read(uint8_t minor, uint8_t rawflag, uint8_t flag)
+int pty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag)
 {
 	struct s_queue q = &ttyinq[minor + PTY_OFFSET + PTY_PAIR];
 	char c;
@@ -633,12 +705,12 @@ int pty_read(uint8_t minor, uint8_t rawflag, uint8_t flag)
 	return nread;
 }
 
-int pty_ioctl(uint8_t minor, uint16_t request, char *data)
+int pty_ioctl(uint_fast8_t minor, uint16_t request, char *data)
 {
 	return tty_ioctl(minor + PTY_OFFSET, rawflag, flag);
 }
 
-void pty_putc_wait(uint8_t minor, char c)
+void pty_putc_wait(uint_fast8_t minor, char c)
 {
 	struct s_queue q = &ptyq[minor + PTY_OFFSET + PTY_PAIR];
 	/* tty output queue to pty */

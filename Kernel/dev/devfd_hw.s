@@ -13,9 +13,11 @@ CPU_Z180	.equ	Z80_TYPE-2
 .endif
 
         ; imported symbols
+        .globl map_buffers
         .globl map_kernel
         .globl map_process_always
         .globl _devfd_dtbl
+	.globl _platform_idle
 
         ; exported sybols
         .globl _devfd_init
@@ -29,7 +31,7 @@ CPU_Z180	.equ	Z80_TYPE-2
         .globl _fd_tick
 
         .include "../platform/kernel.def"
-        .include "../kernel.def"
+        .include "../kernel-z80.def"
 
 
 ;------------------------------------------------------------------------------
@@ -58,7 +60,7 @@ CPU_Z180	.equ	Z80_TYPE-2
 ;    FDC_DATA   - Data/Command Register         (Read/Write)
 ;                               (Byte Writes/Reads)
 ;
-;    FDC_CCR    - Data Rate Register (Write)
+;    FDC_CCR    - Data Rate Register (Write, not present on older FDCs)
 ;       7 6 5 4 3 2 1 0                         (Write)
 ;       | | | | | | +-+-- 00=500 kb/s, RPM/LC Hi, 01=250/300 kb/s (RPM/LC Lo)
 ;       | | | | | |       10=250 kb/s, RPM/LC Lo, 11=1000 kb/s (RPM/LC Hi/Lo)
@@ -98,6 +100,7 @@ _devfd_init:
         POP     BC              ;  minor (in C)
         PUSH    BC              ;   Keep on Stack for Exit
         PUSH    HL
+	PUSH	IY		; Must be saved for the C caller
         LD      A,C
         LD      (drive),A       ; Save Desired Device
         CP      #4              ; Legal?
@@ -108,6 +111,11 @@ indel1: DJNZ    indel1          ;    (settle)
         CALL    Activ8          ;  then bring out of Reset
 indel2: DJNZ    indel2          ;    (settle, B already =0)
         IN      A,(FDC_MSR)
+	CP	#0xD0		; Came out of reset with a pending interrupt
+	JR	NZ, NoPend
+	IN	A,(FDC_DATA)	; Eat the status
+	IN	A,(FDC_MSR)	; Check again
+NoPend:
         CP      #0x80           ; Do we have correct Ready Status?
         JR      NZ,NoDrv        ; ..exit Error if Not
 
@@ -122,9 +130,11 @@ indel2: DJNZ    indel2          ;    (settle, B already =0)
         JR      NZ,NoDrv        ; ..Error if it failed
         LD      oFLG(IY), #1    ; Mark drive as active
         LD      HL,#0           ; Load Ok Status
+	POP	IY
         RET
 
 NoDrv:  LD      HL,#0xFFFF      ; Set Error Status
+	POP	IY
         RET
 
 ;-------------------------------------------------------------
@@ -148,6 +158,9 @@ _devfd_write:
         POP     BC              ;  minor (->C)
         PUSH    BC              ;   Keep on Stack for Exit
         PUSH    HL
+
+	PUSH	IY
+
         LD      A,C
         LD      (drive),A       ; Save Desired Device
 
@@ -196,6 +209,7 @@ Rwf2:   LD      A,(rwRtry)      ; Get retry count
         OR      #0xFF           ; Else show Error
 FhdrX:  LD      L,A
         LD      H,#0
+	POP	IY
         RET                     ;   and Exit
 
 ;-------------------------------------------------------------
@@ -252,8 +266,10 @@ Recal1: LD      (retrys),A
         CALL    FdcDn           ; Clear Pending Ints, Wait for Seek Complete
         POP     HL              ;   (restore regs)
         POP     BC
+	JR	Z, RecalFail
         AND     #0x10           ; Homed?  (B4=1 if No Trk0 found)
         JR      Z,RecOk         ; ..jump to Store if Ok
+RecalFail:
         LD      A,(retrys)
         DEC     A               ; Any trys left?
         JR      NZ,Recal1       ; ..loop if So
@@ -322,7 +338,6 @@ Setup:  LD      A,(drive)
         LD      A,(_devfd_sector)
         ADD     A,oSEC1(IY)     ;    Offset Sector # (base 0) by 1st Sector #
         LD      (sect),A        ;     set in Comnd Blk
-
         XOR A                   ;  (Preset Hi 500 kbps, 3.5 & 5.25" Rate)
         BIT     7,oFMT(IY)      ; Hi (500 kbps) Speed?
         JR      NZ,StSiz0       ; ..jump if Hi-Density/Speed to Set if Yes
@@ -335,7 +350,10 @@ Setup:  LD      A,(drive)
         LD      A,#0x02         ;  (Prepare for 250 kbps)
         JR      Z,StSiz0        ; ..jump if No
         LD      A,#0x01         ; Else set to 300 kbps (@360 rpm = 250kbps)
-StSiz0: OUT     (FDC_CCR),A     ; Set Rate in FDC Reg
+StSiz0:
+.ifne FDC_CCR
+	OUT     (FDC_CCR),A     ; Set Rate in FDC Reg
+.endif
         LD      D,A             ;   preserve Rate bits
 .ifeq CPU_Z180
         IN0     A,(0x1F)        ; Read Z80182 CPU Cntrl Reg (B7=1 if Hi Speed)
@@ -375,6 +393,7 @@ SEEK1:  LD      (retrys),A      ;  save remaining Retry Count
         LD      BC,#(3*256+0x0F);   (3-byte Seek Command = 0FH)
         CALL    FdCmd           ; Execute the Seek
         CALL    FdcDn           ; Clear Pending Int, wait for Seek Complete
+	JR	Z,SEEK2
 
         AND     #0xE0
         CP      #0x20
@@ -412,9 +431,16 @@ SEEKX:  POP     BC              ; Restore Regs
 ; Enter: None.  Used after Seek/Recalibrate Commands
 ; Exit : A = ST0 Result Byte, C = PCN result byte
 ; Uses : AF and C.  All other registers preserved/unused
+;
+; Returns Z on timeout, NZ on success
 
 FdcDn:  PUSH    HL              ; Don't alter regs
-FdcDn0: CALL    WRdy1
+	PUSH	DE
+FdcDn0:	CALL    WRdy1
+	DEC	DE
+	LD	A,D
+	OR	E
+	JR	Z, FdcNotDn	; Timed out
         LD      A,#8            ; Sense Interrupt Status Comnd
         OUT     (FDC_DATA),A
         CALL    WRdy1
@@ -428,6 +454,8 @@ FdcDn0: CALL    WRdy1
         LD      A,L
         BIT     5,A             ; Command Complete?
         JR      Z,FdcDn0        ; ..loop if Not
+FdcNotDn:
+	POP	DE
         POP     HL
         RET
 
@@ -471,7 +499,16 @@ MtrSet: ; now B contains the relevant motor bit we need to be set in the FDC DOR
         LD      A,(HL)          ;    Get value
         LD      (mtm),A         ;     to GP Counter
         EI                      ; Ensure Ints are ABSOLUTELY Active..
-MotoLp: LD      A,(mtm)         ;  ..otherwise, loop never times out!
+;
+;	FIXME: this is wrong on two levels
+;	#1 We shouldn't rely upon an IRQ (we can busy wait too)
+;	#2 The timers are set in 1/20ths but it's not clear everyone is
+;	using 1/20ths for the IRQ call (See p112)
+;
+MotoLp:	PUSH	DE
+	CALL	_platform_idle
+	POP	DE
+	LD      A,(mtm)         ;  ..otherwise, loop never times out!
         OR      A               ; Up to Speed?
         JR      NZ,MotoLp       ; ..loop if Not
         DI                      ; No Ints now..
@@ -601,8 +638,12 @@ FdcXit:
 ; inner section of FdCmd routine, has to touch buffers etc
 FdCmdXfer:
         BIT     0,D             ; Buffer in user memory?
-        CALL    NZ, map_process_always
-
+	JR	Z,  kernxfer
+        CALL    map_process_always
+	JR 	doxfer
+kernxfer:
+	CALL	map_buffers
+doxfer:
         ; send the command (length is in B, command is in C)
         PUSH    HL              ; save pointer for possible Transfer
         LD      HL,#comnd       ; Point to Command Block
@@ -626,8 +667,6 @@ FdCiR3: AND     #0x20           ; are we still in the Execution Phase? (1 cycle 
 
 ; tidy up and return
 FdCmdXferDone:
-        BIT     0,D             ; Buffer in user memory?
-        RET     Z               ; done if not
         JP      map_kernel      ; else remap kernel and return
 
 ;-------------------------------------------------------------

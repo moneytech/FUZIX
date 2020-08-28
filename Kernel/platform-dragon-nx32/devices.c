@@ -25,7 +25,7 @@ struct devsw dev_tab[] =  /* The device driver switch table */
   /* 1: /dev/fd		Floppy disc block devices  */
   {  fd_open,     no_close,    fd_read,   fd_write,   no_ioctl },
   /* 2: /dev/tty	TTY devices */
-  {  tty_open,     tty_close,   tty_read,  tty_write,  gfx_ioctl },
+  {  tty_open,    my_tty_close, tty_read,  tty_write,  gfx_ioctl },
   /* 3: /dev/lpr	Printer devices */
   {  lpr_open,     lpr_close,   no_rdwr,   lpr_write,  no_ioctl  },
   /* 4: /dev/mem etc	System devices (one offs) */
@@ -72,17 +72,23 @@ void device_init(void)
 {
     int i;
 
+#ifdef CONFIG_SD
     if (spi_setup())
         devsd_init();
+#endif
+#ifdef CONFIG_IDE
     i = cart_find(CART_IDE);
     if (i >= 0) {
       ide_base = cartaddr[i] ? cartaddr[i]: ide_base;
       ide_slot = i;
+      devide_init();
     }
-    devide_init();
+#endif
+#ifdef CONFIG_SCSI
     i = cart_find(CART_TC3);
     if (i >= 0) {
       scsi_slot = i;
       devscsi_init();
     }
+#endif
 }

@@ -13,10 +13,10 @@ struct devsw dev_tab[] =  /* The device driver switch table */
 {
 // minor    open         close        read      write       ioctl
 // -----------------------------------------------------------------
-  /* 0: /dev/fd		Floppy disc block devices  */
-  {  fd_open,     no_close,    fd_read,   fd_write,   no_ioctl },
-  /* 1: /dev/hd		Hard disc block devices (absent) */
+  /* 0: /dev/hd		Hard disc block devices (absent) */
   {  hd_open,     no_close,    hd_read,   hd_write,   no_ioctl },
+  /* 1: /dev/fd		Floppy disc block devices  */
+  {  fd_open,     no_close,    fd_read,   fd_write,   no_ioctl },
   /* 2: /dev/tty	TTY devices */
   {  tty_open,     tty_close,   tty_read,  tty_write,  tty_ioctl },
   /* 3: /dev/lpr	Printer devices */
@@ -42,6 +42,6 @@ void device_init(void)
   zrtc_init();
   /* Add 64 swaps (4MB) to use the entire J drive */
   for (i = 0; i < MAX_SWAPS; i++)
-    swapmap_add(i);
+    swapmap_init(i);
   sock_init();
 }

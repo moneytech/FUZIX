@@ -25,10 +25,12 @@ void updoff(void)
    as a 32bit OS might */
 arg_t _lseek(void)
 {
+	static off_t zero;
 	inoptr ino;
 	struct oft *o;
 	off_t p;
 	off_t n;
+	off_t *pt;
 	
 	if (uget(offset, &n, sizeof(n)))
 	        return -1;
@@ -44,21 +46,24 @@ arg_t _lseek(void)
 	o = &of_tab[udata.u_files[file]];
 	p = o->o_ptr;
 
-	switch (flag) {
-	case 0:
-		p = n;
-		break;
-	case 1:
-		p += n;
-		break;
-	case 2:
-		p = ino->c_node.i_size + n;
-		break;
-	default:
+	/* 32bit maths is really messy on some processors and the three cases
+	   produce three sets of 32bit maths operations. Instead we take a
+	   pointer to what to use as the offset and do the maths once */
+
+	if (flag == 0)
+		pt = &zero;
+	else if (flag == 1)
+		pt = &p;
+	else if (flag == 2)
+		pt = (off_t *)&ino->c_node.i_size;
+	else
                 goto bad;
-	}
+
+	p = *pt + n;
+
 	if (p < 0)
 	        goto bad;
+
         o->o_ptr = p;
 	uput(&p, offset, sizeof(n));
 	return 0;
@@ -92,8 +97,8 @@ arg_t _sync(void)
   char *path;
   char *buf;
  ********************************************/
-#define path (char *)udata.u_argn
-#define buf (char *)udata.u_argn1
+#define path (uint8_t *)udata.u_argn
+#define buf (uint8_t *)udata.u_argn1
 
 arg_t _stat(void)
 {
@@ -116,7 +121,7 @@ arg_t _stat(void)
   char *buf;
  ********************************************/
 #define fd (int16_t)udata.u_argn
-#define buf (char *)udata.u_argn1
+#define buf (uint8_t *)udata.u_argn1
 
 arg_t _fstat(void)
 {
@@ -133,34 +138,16 @@ arg_t _fstat(void)
 
 
 /* Utility for stat and fstat */
-int stcpy(inoptr ino, char *buf)
+int stcpy(inoptr ino, uint8_t *buf)
 {
-	/* Copying the structure a member at a time is too expensive.  Instead we
-	 * copy sequential runs of identical types (the only members which the
-	 * compiler guarantees are next to each other). */
+	static struct _uzistat st;
 
-	uint32_t zero = 0;
-	struct _uzistat* st = (struct _uzistat*) buf;
-	int err = uput(&ino->c_dev,            &st->st_dev,   2 * sizeof(uint16_t));
-	err |=    uput(&ino->c_node.i_mode,    &st->st_mode,  4 * sizeof(uint16_t));
-	err |=    uput(&ino->c_node.i_addr[0], &st->st_rdev,  1 * sizeof(uint16_t));
-	err |=    uput(&ino->c_node.i_size,    &st->st_size,  4 * sizeof(uint32_t));
-	err |=    uput(&zero,                  &st->st_timeh, 1 * sizeof(uint32_t));
-	return err;
-}
-
-
-arg_t dup_op(int fd, int base)
-{
-	int8_t newd;
-
-	if ((newd = uf_alloc_n(base)) == -1)
-		return (-1);
-
-	udata.u_files[newd] = udata.u_files[fd];
-	++of_tab[udata.u_files[fd]].o_refs;
-
-	return (newd);
+	st.st_dev = ino->c_dev;
+	st.st_ino = ino->c_num;
+	st.st_rdev = ino->c_node.i_addr[0];
+	memcpy(&st.st_mode, &ino->c_node.i_mode, 4 * sizeof(uint16_t));
+	memcpy(&st.st_size, &ino->c_node.i_size, 4 * sizeof(uint32_t));
+	return uput(&st, buf, sizeof(st));
 }
 
 /*******************************************
@@ -171,7 +158,7 @@ arg_t dup_op(int fd, int base)
 
 arg_t _dup(void)
 {
-	int8_t newd;
+	int_fast8_t newd;
 	if (getinode(oldd) == NULLINODE)
 		return (-1);
 	if ((newd = uf_alloc()) == -1)
@@ -198,12 +185,16 @@ arg_t _dup2(void)
 {
 
 	if (getinode(oldd) == NULLINODE)
-		return (-1);
+		return -1;
 
 	if (newd < 0 || newd >= UFTSIZE) {
 		udata.u_error = EBADF;
-		return (-1);
+		return -1;
 	}
+
+	/* No-op - but we must not close and dup so catch it */
+	if (newd == oldd)
+		return oldd;
 
 	if (udata.u_files[newd] != NO_FILE)
 		doclose(newd);
@@ -211,7 +202,7 @@ arg_t _dup2(void)
 	udata.u_files[newd] = udata.u_files[oldd];
 	++of_tab[udata.u_files[oldd]].o_refs;
 
-	return (0);
+	return newd;
 }
 
 #undef oldd
@@ -226,7 +217,7 @@ arg_t _dup2(void)
 
 arg_t _umask(void)
 {
-	int omask;
+	unsigned int omask;
 
 	omask = udata.u_mask;
 	udata.u_mask = mask & 0777;
@@ -251,7 +242,7 @@ arg_t _ioctl(void)
 {
 	inoptr ino;
 	uint16_t dev;
-	uint8_t rclass = ((uint8_t)(request >> 8)) & 0xC0;
+	uint_fast8_t rclass = ((uint8_t)(request >> 8)) & 0xC0;
 	struct oft *oftp;
 
 	if ((ino = getinode(fd)) == NULLINODE)
@@ -304,8 +295,8 @@ int fildes[];
 
 arg_t _pipe(void)
 {
-	int8_t u1, u2, oft1, oft2;
-	inoptr ino;
+	int_fast8_t u1, u2, oft1, oft2;
+	regptr inoptr ino;
 
 /* bug fix SN */
 	if ((u1 = uf_alloc()) == -1)
@@ -322,6 +313,11 @@ arg_t _pipe(void)
 	if (!(ino = i_open(root_dev, 0))) {
 		oft_deref(oft2);
 		goto nogood2;
+	}
+
+	if (ino->c_flags & CRDONLY) {
+		udata.u_error = EROFS;
+		goto nogood3;
 	}
 
 	udata.u_files[u2] = oft2;
@@ -345,6 +341,8 @@ arg_t _pipe(void)
 	uputw(u2, fildes + 1);
 	return (0);
 
+      nogood3:
+	i_deref(ino);
       nogood2:
 	oft_deref(oft1);
 	udata.u_files[u1] = NO_FILE;
@@ -359,14 +357,13 @@ arg_t _pipe(void)
 unlink (path)                     Function 6
 char *path;
 ********************************************/
-#define path (char *)udata.u_argn
+#define path (uint8_t *)udata.u_argn
 
 arg_t _unlink(void)
 {
 	inoptr ino;
 	inoptr pino;
 	int r;
-	char fname[FILENAME_LEN + 1];
 
 	ino = n_open(path, &pino);
 
@@ -376,9 +373,9 @@ arg_t _unlink(void)
 		udata.u_error = ENOENT;
 		return (-1);
 	}
-	filename(path, fname);
-	r = unlinki(ino, pino, fname);
-	i_deref(pino);
+	i_lock(pino);
+	r = unlinki(ino, pino, lastname);
+	i_unlock_deref(pino);
 	i_deref(ino);
 	return r;
 }
@@ -394,13 +391,13 @@ char   *buf;
 uint16_t nbytes;
 ********************************************/
 #define d (int16_t)udata.u_argn
-#define buf (char *)udata.u_argn1
+#define buf (uint8_t *)udata.u_argn1
 #define nbytes (susize_t)udata.u_argn2
 
-arg_t _read(void)
+static arg_t readwrite(uint_fast8_t reading)
 {
 	inoptr ino;
-	uint8_t flag;
+	uint_fast8_t flag;
 
 	if (!nbytes)
 		return 0;
@@ -412,14 +409,21 @@ arg_t _read(void)
 
 	if (!valaddr(buf, nbytes))
 	        return -1;
+
 	/* Set up u_base, u_offset, ino; check permissions, file num. */
-	if ((ino = rwsetup(true, &flag)) == NULLINODE)
+	if ((ino = rwsetup(reading, &flag)) == NULLINODE)
 		return -1;	/* bomb out if error */
 
-	readi(ino, flag);
+	(reading ? readi : writei)(ino, flag);
 	updoff();
+	i_unlock(ino);
 
-	return (udata.u_count);
+	return udata.u_done;
+}
+
+arg_t _read(void)
+{
+	return readwrite(1);
 }
 
 #undef d
@@ -433,7 +437,7 @@ char   *buf;
 uint16_t nbytes;
 ********************************************/
 #define d (int16_t)udata.u_argn
-#define buf (char *)udata.u_argn1
+#define buf (uint8_t *)udata.u_argn1
 #define nbytes udata.u_argn2
 
 /*
@@ -462,32 +466,12 @@ char   *buf;
 uint16_t nbytes;
 ********************************************/
 #define d (int16_t)udata.u_argn
-#define buf (char *)udata.u_argn1
+#define buf (uint8_t *)udata.u_argn1
 #define nbytes (susize_t)udata.u_argn2
 
 arg_t _write(void)
 {
-	inoptr ino;
-	uint8_t flag;
-
-	if (!nbytes)
-		return 0;
-
-	if ((ssize_t)nbytes < 0) {
-		udata.u_error = EINVAL;
-	        return -1;
-	}
-
-	if (!valaddr(buf, nbytes))
-	        return -1;
-	/* Set up u_base, u_offset, ino; check permissions, file num. */
-	if ((ino = rwsetup(false, &flag)) == NULLINODE)
-		return (-1);	/* bomb out if error */
-
-	writei(ino, flag);
-	updoff();
-
-	return (udata.u_count);
+	return readwrite(0);
 }
 
 #undef d

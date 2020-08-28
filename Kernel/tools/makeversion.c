@@ -27,6 +27,9 @@ struct sysinfoblk sysinfo = {\n\
 	{0, 0, 0},\n\
 	0,\n\
 	0,\n\
+	0,\n\
+	{0, 0, 0},\n\
+	{0, 0, 0, 0, 0, 0, 0, 0},\n\
 	/* Quoting to work around cc65 bug */\n\
 	\"%s\\0\"\"Fuzix\\0\"\"%s\\0\"\"%s\"\n\
 };\n\n",
@@ -41,7 +44,7 @@ void write_header(FILE *out, char *v, char *sv, char *p)
  */\n\
 struct sysinfoblk {\n\
   uint8_t infosize;		/* For expandability */\n\
-  uint8_t banks;		/* Banks in our 64K (and thus pagesize) */\n\
+  uint8_t banks;		/* Banks in 64K (and thus pagesize) */\n\
   uint8_t max_open;\n\
   uint8_t nproc;		/* Number of processes */\n\
   uint16_t ticks;		/* Tick rate in HZ */\n\
@@ -54,6 +57,9 @@ struct sysinfoblk {\n\
   uint16_t loadavg[3];\n\
   uint16_t swapk;\n\
   uint16_t swapusedk;\n\
+  uint8_t cputype;		/* CPU type information */\n\
+  uint8_t cpu[3];		/* CPU type specific data */\n\
+  uint16_t spare[8];\n\
   char uname[%d];\n\
 };\n\
 \n", (int)(strlen(v) + strlen(sv) + strlen(p) + 9));

@@ -1,7 +1,7 @@
             .module vdp
 
             .include "kernel.def"
-            .include "../kernel.def"
+            .include "../kernel-z80.def"
 
 	    .include "../dev/vdp1.s"
 
@@ -12,6 +12,7 @@
 	    .globl _clear_lines
 	    .globl _cursor_off
 	    .globl _cursor_on
+	    .globl _cursor_disable
 	    .globl _plot_char
 	    .globl vdpload
 
@@ -51,6 +52,11 @@ vdploadl2:
 	     pop af
 	     dec a
 	     jr nz, vdploadl	; 768 bytes total
+
+	     ld de,#0x1800	; 24 lines from 0
+	     push de
+	     call clear_lines
+	     pop de
 	     ret
 
 
@@ -105,6 +111,7 @@ _cursor_on:  ld a, (_curtty)
 _cursor_off: ld a, (_curtty)
 	     or a
 	     jp nz, cursor_off		; VDP
+_cursor_disable:
 	     ret
 
 _clear_across:
@@ -218,12 +225,11 @@ _plot_char:
 
 
 ;
-;
-;	FIXME: should use vdpport, but right now vdpport is in data not
-;	common space.
+;	The VDP int turns up on a CTC pin and we can just
+;	ignore it happily there instead of perturbing register
+;	access.
 ;
 platform_interrupt_all:
-	     in a, (2)
 	     ret
 
 	     .area _DATA

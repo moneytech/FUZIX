@@ -1,6 +1,7 @@
 #include <kernel.h>
 #include <kdata.h>
 #include <printf.h>
+#include <exec.h>
 
 #ifdef CONFIG_BANK32
 
@@ -61,9 +62,9 @@ void pagemap_add(uint8_t page)
 void pagemap_free(ptptr p)
 {
 	uint8_t *ptr = (uint8_t *) & p->p_page;
-	pfree[pfptr--] = *ptr;
+	pfree[pfptr++] = *ptr;
 	if (*ptr != ptr[1]) {
-		pfree[pfptr--] = ptr[1];
+		pfree[pfptr++] = ptr[1];
                 invalidate_cache((uint16_t)ptr[1]);
         }
 }
@@ -115,8 +116,10 @@ int pagemap_alloc(ptptr p)
  *	to worry about this in the 32K + common case because we'll switchin
  *	at one size, and switchout at the other and the udata will just get
  *	saved/restored to the right places.
+ *
+ *	FIXME: needs fixing as we update memory management
  */
-int pagemap_realloc(usize_t size) {
+int pagemap_realloc(struct exec *hdr, usize_t size) {
 	int have = maps_needed(udata.u_top);
 	int want = maps_needed(size);
 	uint8_t *ptr = (uint8_t *) & udata.u_page;
@@ -127,9 +130,13 @@ int pagemap_realloc(usize_t size) {
 	if (want == have)
 		return 0;
 	if (have > want) {
+		/* Make a copy of the high vectors in the new low page */
 		pfree[pfptr++] = ptr[1];
 		ptr[1] = *ptr;
+		irq = __hard_di();
+		program_vectors(&udata.u_page);
 		udata.u_ptab->p_page = udata.u_page;
+		__hard_irqrestore(irq);
 		return 0;
 	}
 	/* If we are adding then just insert the new pages, keeping the common
@@ -152,8 +159,22 @@ int pagemap_realloc(usize_t size) {
 	return 0;
 }
 
+int pagemap_prepare(struct exec *hdr)
+{
+	/* If it is relocatable load it at PROGLOAD */
+	if (hdr->a_base == 0)
+		hdr->a_base = PROGLOAD >> 8;
+	/* If it doesn't care about the size then the size is all the
+	   space we have */
+	if (hdr->a_size == 0)
+		hdr->a_size = (ramtop >> 8) - hdr->a_base;
+	return 0;
+}
+
 usize_t pagemap_mem_used(void) {
 	return pfptr << 5;
 }
+
+/* FIXME: Swap */
 
 #endif

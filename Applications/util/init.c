@@ -12,13 +12,13 @@
  *	- Give serious consideration to hiding cron/at in the daemon
  *	  to keep our background daemon count as low as we can
  *	- Ditto for syslogd
- *	- Debug telinit q handling
  *	(it's not turning into systemd honest)
  */
 
 #include <string.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -45,7 +45,7 @@
 
 #define crlf()   write(1, "\n", 1)
 
-static void spawn_login(struct passwd *, const char *, const char *, const char *);
+static void spawn_login(struct passwd *, const char *, const char *, const char *, uint8_t);
 static pid_t getty(const char **, const char *);
 
 static struct utmp ut;
@@ -112,7 +112,7 @@ int showfile(const char *fname)
 	return 0;
 }
 
-void putstr(char *str)
+void putstr(const char *str)
 {
 	write(1, str, strlen(str));
 }
@@ -196,6 +196,8 @@ static int clear_utmp(struct initpid *ip, uint16_t count, pid_t pid)
 			ut.ut_id[1] = p[2];
 			*ut.ut_user = 0;
 			pututline(&ut);
+			/* So we don't leave this open for write */
+			endutent();
 			/* Mark as done */
 			initpid[i].pid = 0;
 			/* Respawn the task if appropriate */
@@ -218,7 +220,7 @@ static void clear_zombies(int flags)
 	/* See if we care what died. If we do then also check that
 	 * do not need to respawn it
 	 */
-	 if (clear_utmp(initpid, initcount, pid) == 0)
+	if (clear_utmp(initpid, initcount, pid) == 0)
 	 	return;
 	if (oldpid)
 		clear_utmp(oldpid, oldcount, pid);
@@ -274,6 +276,11 @@ static void parse_initline(void)
 			sdata++;
 		return;
 	}
+	/* Handle a blank line gracefully */
+	if (*sdata == '\n') {
+		sdata++;
+		return;
+	}
 	/* We start with a line length then the id: bits. Don't write
 	 * the length yet - we may still be using that byte for input */
 	linelen = idata++;
@@ -283,6 +290,7 @@ static void parse_initline(void)
 		bad_line();
 		return;
 	}
+	*idata = 0;
 	while (*sdata != ':') {
 		if (*sdata == '\n' || sdata > sdata_end) {
 			bad_line();
@@ -358,14 +366,31 @@ static void brk_warn(void *p)
  */
 static void parse_inittab(void)
 {
+	struct initpid *ip;
+	uint8_t *p;
+	int i;
 	idata = inittab = sdata;
-	while (sdata < sdata_end)
+	while (sdata && sdata < sdata_end)
 		parse_initline();
+
+	/* Align the pid table - eww */
+	/* FIXME: align properly to 4 bytes */
+	if (((uint8_t)idata) & 1)
+		idata++;
+
 	/* Allocate space for the control arrays */
 	initpid = (struct initpid *) idata;
 	idata += sizeof(struct initpid) * initcount;
 	brk_warn(idata);
-	memset(initpid, 0, sizeof(struct initpid) * initcount);
+	ip = initpid;
+	p = inittab;
+	for (i = 0; i < initcount; i++) {
+		ip->id[0] = p[1];
+		ip->id[1] = p[2];
+		ip->pid = 0;
+		p += *p;
+		ip++;
+	}
 }
 
 /*
@@ -381,8 +406,8 @@ static void load_inittab(void)
 		write(2, "init: no inittab\n", 17);
 		goto fail;
 	}
-	/* FIXME: this may unalign our memory pool */
-	sdata = sbrk(st.st_size + 1);
+	/* Keep the pool aligned */
+	sdata = sbrk((st.st_size + 4) & ~3);
 	if (sdata == (uint8_t *) - 1) {
 		write(2, "init: out of memory\n", 20);
 		goto fail;
@@ -469,11 +494,10 @@ static int cleanup_runlevel(uint8_t oldmask, uint8_t newmask, int sig)
 
 	while (n < initcount) {
 		/* Dying ? */
-		if ((p[3] & oldmask) && !(p[3] && newmask)) {
+		if ((p[3] & oldmask) && !(p[3] & newmask)) {
 			/* Count number still to die */
 			if (p[4] == INIT_RESPAWN && initpid[n].pid) {
-				/* Group kill */
-				if (kill(-initpid[n].pid, sig) == 0)
+				if (kill(initpid[n].pid, sig) == 0)
 					nrun++;
 			}
 		}
@@ -504,7 +528,7 @@ static void exit_runlevel(uint8_t oldmask, uint8_t newmask)
 }
 
 /*
- *	Start everything that should be runnign at this run level. Take
+ *	Start everything that should be running at this run level. Take
  *	care not to re-start stuff that survives the transition
  */
 static void do_for_runlevel(uint8_t newmask, int op)
@@ -513,11 +537,11 @@ static void do_for_runlevel(uint8_t newmask, int op)
 	struct initpid *t = initpid;
 	int n = 0;
 	while (n < initcount) {
-		t->id[0] = p[1];
-		t->id[1] = p[2];
 		if (!(p[3] & newmask))
 			goto next;
 		if ((p[4] & INIT_OPMASK) == op) {
+			if (!p[5])
+				goto next;
 			/* Already running ? */
 			if (op == INIT_RESPAWN && t->pid)
 				goto next;
@@ -576,17 +600,15 @@ int main(int argc, char *argv[])
 
 	/* make stdin, stdout and stderr point to /dev/tty1 */
 
-	if (fdtty1 != 0)
-		close(0);
 	dup(fdtty1);
-	close(1);
-	dup(fdtty1);
-	close(2);
 	dup(fdtty1);
 
 	putstr("init version 0.9.0ac#1\n");
 
-	close(open("/var/run/utmp", O_WRONLY | O_CREAT | O_TRUNC));
+	if (argv[1] && strcmp(argv[1], "s") == 0) {
+		execl("/bin/sh", "-sh", NULL);
+		execl("/bin/ssh", "-ssh", NULL);
+	}
 
 	membase = sbrk(0);
 
@@ -598,15 +620,10 @@ int main(int argc, char *argv[])
 	for (;;) {
 		clear_zombies(0);
 		if (dingdong) {
-			uint8_t newrl;
+			uint8_t newrl, orl;
 			int fd = open("/var/run/initctl", O_RDONLY);
 			if (fd != -1 && read(fd, &newrl, 1) == 1) {
-				write(1, &newrl, 1);
-				if (newrl != 'q') {
-					exit_runlevel(1 << runlevel, 1 << newrl);
-					runlevel = newrl;
-					enter_runlevel(1 << runlevel);
-				} else {
+				if (newrl == 'q') {
 					/* Reload */
 					reload_inittab();
 					/* Prune anything running that should
@@ -615,6 +632,13 @@ int main(int argc, char *argv[])
 					/* Start anything added to the current
 					   run level */
 					enter_runlevel(1 << runlevel);
+				} else if (newrl != runlevel) {
+					orl = runlevel;
+					/* Set this before we reap anything
+					   or it will respawn */
+					runlevel = newrl;
+					exit_runlevel(1 << orl, 1 << newrl);
+					enter_runlevel(1 << newrl);
 				}
 			}
 			close(fd);
@@ -653,7 +677,7 @@ static void envset(const char *a, const char *b)
 static struct termios tref = {
 	BRKINT | ICRNL,
 	OPOST | ONLCR,
-	CREAD | HUPCL,
+	CS8 | CREAD | HUPCL,
 	ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN,
 	{CTRL('D'), 0, CTRL('H'), CTRL('C'),
 	 CTRL('U'), CTRL('\\'), CTRL('Q'), CTRL('S'),
@@ -686,20 +710,29 @@ const char *bauds[] = {
 	"115200"
 };
 
-static int baudmatch(const char *p)
+static int baudmatch(int fd, const char *p)
 {
 	int i;
 	const char **str = bauds;
+	static struct termios ttmp;
 
-	if (p == NULL)
-		return B9600;
-
-	for(i = 1; i < 15; i++) {
-		if (strcmp(p, *str++) == 0)
-			return i;
+	if (p) {
+		for(i = 1; i < 15; i++) {
+			if (strcmp(p, *str++) == 0)
+				return i;
+		}
+		write(1, "Unknown baud rate '", 18);
+		putstr(p);
+		write(1, "'.\n", 3);
 	}
-	return B9600;
+	tcgetattr(fd, &ttmp);
+	return ttmp.c_cflag & CBAUD;
 }
+
+static struct winsize winsz = {
+	25, 80
+};
+
 
 static pid_t getty(const char **argv, const char *id)
 {
@@ -710,6 +743,8 @@ static pid_t getty(const char **argv, const char *id)
 	const char *host = "";
 	char *p, buf[50], salt[3];
 	char hn[64];
+	uint8_t console = 0;
+	uint16_t vtsize;
 
 	gethostname(hn, sizeof(hn));
 
@@ -749,6 +784,9 @@ static pid_t getty(const char **argv, const char *id)
 					if ((issue = *++argv) == NULL)
 						usage();
 					break;
+				case 'c':
+					console = 1;
+					break;
 				default:
 					usage();
 				}
@@ -767,24 +805,35 @@ static pid_t getty(const char **argv, const char *id)
 			if (fdtty < 0)
 				return -1;
 
+			if (fchown(fdtty, 0, 0))
+				putstr("getty: can not reset owner of tty\n");
+
 			/* here we are inside child's context of execution */
 			envset("PATH", "/bin:/usr/bin");
 			envset("CTTY", argv[0]);
+
+			/* retrieve default size from VT if available */
+			vtsize = ioctl(fdtty, VTSIZE, &winsz);
+			if (vtsize != -1) {
+				winsz.ws_col = vtsize & 0xFF;
+				winsz.ws_row = vtsize >> 8;
+			}
 
 			if (argv[1]) {
 				if (argv[2])
 					envset("TERM", argv[2]);
 				if (argv[3] && argv[4]) {
-					static struct winsize winsz;
 					winsz.ws_col = atoi(argv[3]);
 					winsz.ws_row = atoi(argv[4]);
-					if (ioctl(fdtty, TIOCSWINSZ, &winsz))
-						perror("winsz");
 				}
 			}
+			if (ioctl(fdtty, TIOCSWINSZ, &winsz))
+				perror("winsz");
 			/* Figure out the baud bits. It's cheaper to do this with strings
 			   than ulongs! */
-			tref.c_cflag |= baudmatch(argv[1]);
+			tref.c_cflag |= baudmatch(fdtty, argv[1]);
+
+			tcsetattr(fdtty, TCSANOW, &tref);
 
 			/* make stdin, stdout and stderr point to fdtty */
 
@@ -796,6 +845,7 @@ static pid_t getty(const char **argv, const char *id)
 			ut.ut_id[0] = id[0];
 			ut.ut_id[1] = id[1];
 			pututline(&ut);
+			endutent();
 
 			/* display the /etc/issue file, if exists */
 			if (issue)
@@ -814,11 +864,15 @@ static pid_t getty(const char **argv, const char *id)
 				if ((p = strchr(buf, '\n')) != NULL)
 					*p = '\0';	/* strip newline */
 
+				if (*buf == 0)
+					continue;
+
 				pwd = getpwnam(buf);
 
+				if (pwd == NULL || *pwd->pw_passwd)
+					p = getpass("Password: ");
 				if (pwd) {
-					if (pwd->pw_passwd[0] != '\0') {
-						p = getpass("Password: ");
+					if (*pwd->pw_passwd) {
 						salt[0] = pwd->pw_passwd[0];
 						salt[1] = pwd->pw_passwd[1];
 						salt[2] = '\0';
@@ -827,8 +881,9 @@ static pid_t getty(const char **argv, const char *id)
 						pr = "";
 					}
 					if (strcmp(pr, pwd->pw_passwd) == 0)
-						spawn_login(pwd, argv[0], id, host);
-				}
+						spawn_login(pwd, argv[0], id, host, console);
+				} else /* So you can't tell by the delay time */
+					crypt(p, "ZZ");
 
 				putstr("\nLogin incorrect\n\n");
 				signal(SIGALRM, sigalarm);
@@ -842,7 +897,7 @@ static pid_t getty(const char **argv, const char *id)
 
 static char *argp[] = { "sh", NULL };
 
-static void spawn_login(struct passwd *pwd, const char *tty, const char *id, const char *host)
+static void spawn_login(struct passwd *pwd, const char *tty, const char *id, const char *host, uint8_t console)
 {
 	char *p, buf[50];
 
@@ -862,6 +917,15 @@ static void spawn_login(struct passwd *pwd, const char *tty, const char *id, con
 	/* We don't care if initgroups fails - it only grants extra rights */
 	initgroups(pwd->pw_name, pwd->pw_gid);
 
+	/* change owner of tty device */
+	if (fchown(0, pwd->pw_uid, pwd->pw_gid))
+		putstr("login: unable to change owner of controlling tty\n");
+	if (console) {
+		/* Claim console associated files */
+		chown("/dev/input", pwd->pw_uid, pwd->pw_gid);
+		chmod("/dev/input", 0600);
+	}
+
 	/* But we do care if these fail! */
 	if (setgid(pwd->pw_gid) == -1 ||
 		setuid(pwd->pw_uid) == -1)
@@ -873,6 +937,8 @@ static void spawn_login(struct passwd *pwd, const char *tty, const char *id, con
 	envset("LOGNAME", pwd->pw_name);
 	envset("HOME", pwd->pw_dir);
 	envset("SHELL", pwd->pw_shell);
+
+	umask(022);
 
 	/* home directory */
 

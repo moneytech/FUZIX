@@ -4,30 +4,44 @@
 #include <kdata.h>
 #include <printf.h>
 #include <blkdev.h>
-#include <config.h>
+#include "mbr.h"
+#include "gpt.h"
 
-typedef struct {
-    /* Described this way so that it packs */
-    uint8_t  status_chs_first[4];
-    uint8_t  type_chs_last[4];
-    uint32_t lba_first;
-    uint32_t lba_count;
-} partition_table_entry_t;
+#ifdef CONFIG_DYNAMIC_SWAP
+/*
+ *	This function is called for partitioned devices if a partition is found
+ *	and marked as swap type. The first one found will be used as swap. We
+ *	only support one swap device.
+ */
+static void mbr_swap_found(uint8_t letter, uint8_t m)
+{
+  blkdev_t *blk = blk_op.blkdev;
+  uint16_t n = 0;
+  uint32_t off;
+  if (swap_dev != 0xFFFF)
+    return;
+  letter -= 'a';
+  kputs("(swap) ");
+  swap_dev = letter << 4 | m;
+  off = blk->lba_count[m - 1];
+  /* Avoid dragging in 32bit divide libraries for one use only */
+  while(off >= SWAP_SIZE && n < MAX_SWAPS) {
+    off -= SWAP_SIZE;
+    n++;
+  }
+  /* Partition swap is 0 based */
+  while(n)
+    swapmap_init(--n);
+}
+#endif
 
-#define MBR_ENTRY_COUNT 4
-#define MBR_SIGNATURE 0xAA55
-typedef struct {
-    uint8_t bootcode[446];
-    partition_table_entry_t partition[MBR_ENTRY_COUNT];
-    uint16_t signature;
-} boot_record_t;
-
-void mbr_parse(char letter)
+/* FIXME: Needs to be int so we can call multiple and get the right type */
+void mbr_parse(uint_fast8_t letter)
 {
     boot_record_t *br;
-    uint8_t i, seen = 0;
+    uint_fast8_t i, seen = 0;
     uint32_t ep_offset = 0, br_offset = 0;
-    uint8_t next = 0;
+    uint_fast8_t next = 0;
 
     kprintf("hd%c: ", letter);
 
@@ -54,6 +68,14 @@ void mbr_parse(char letter)
 	    break;
         }
 
+#ifndef BOOTDEVICE
+        /* Valid first MBR, look for boot command string */
+        if (seen == 0) {
+		if (le16_to_cpu(br->cmdflag) == MBR_BOOT_CMD)
+			set_boot_line((const char *)br->cmdline);
+	}
+#endif
+
 	/* avoid an infinite loop where extended boot records form a loop */
 	if(seen >= 50)
 	    break;
@@ -69,7 +91,14 @@ void mbr_parse(char letter)
         blk_op.lba = 0;
 
 	for(i=0; i<MBR_ENTRY_COUNT && next < MAX_PARTITIONS; i++){
-	    switch(br->partition[i].type_chs_last[0]){
+	    uint8_t t = br->partition[i].type_chs_last[0];
+	    switch(t) {
+#ifdef CONFIG_GPT
+		case MBR_GPT_PROTECTED_TYPE:
+		    // TODO assert next is zero (unless hybrid...)
+		    parse_gpt((uint8_t *) br, i);
+		    goto out;
+#endif
 		case 0:
 		    break;
 		case 0x05:
@@ -92,6 +121,10 @@ void mbr_parse(char letter)
 		    blk_op.blkdev->lba_count[next] = le32_to_cpu(br->partition[i].lba_count);
 		    next++;
 		    kprintf("hd%c%d ", letter, next);
+#ifdef CONFIG_DYNAMIC_SWAP
+		    if(t == FUZIX_SWAP)
+			mbr_swap_found(letter, next);
+#endif
 	    }
 	}
 	seen++;
@@ -100,6 +133,8 @@ void mbr_parse(char letter)
     if(ep_offset && next >= 4)
 	kputs("> ");
 
+out:
     /* release temporary memory */
-    brelse((bufptr)br);
+    tmpfree(br);
 }
+

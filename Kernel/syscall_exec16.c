@@ -2,53 +2,18 @@
 #include <version.h>
 #include <kdata.h>
 #include <printf.h>
-
-static int bload(inoptr i, uint16_t bl, uint16_t base, uint16_t len)
-{
-	blkno_t blk;
-	while(len) {
-		uint16_t cp = min(len, 512);
-		blk = bmap(i, bl, 1);
-		if (blk == NULLBLK)
-			uzero((uint8_t *)base, 512);
-		else {
-#ifdef CONFIG_LEGACY_EXEC
-			uint8_t *buf;
-			buf = bread(i->c_dev, blk, 0);
-			if (buf == NULL) {
-				kputs("bload failed.\n");
-				return -1;
-			}
-			uput(buf, (uint8_t *)base, cp);
-			bufdiscard((bufptr)buf);
-			brelse((bufptr)buf);
-#else
-			/* FIXME: allow for async queued I/O here. We want
-			   an API something like breadasync() that either
-			   does the cdread() or queues for a smart platform
-			   or box with floppy tape devices */
-			udata.u_offset = (off_t)blk << 9;
-			udata.u_count = 512;
-			udata.u_base = (uint8_t *)base;
-			if (cdread(i->c_dev, 0) < 0) {
-				kputs("bload failed.\n");
-				return -1;
-			}
-#endif
-		}
-		base += cp;
-		len -= cp;
-		bl++;
-	}
-	return 0;
-}
+#include <exec.h>
 
 static void close_on_exec(void)
 {
-	int j;
+	/* Keep the mask separate to stop SDCC generating crap code */
+	uint16_t m = 1U << (UFTSIZE - 1);
+	int8_t j;
+
 	for (j = UFTSIZE - 1; j >= 0; --j) {
-		if (udata.u_cloexec & (1 << j))
+		if (udata.u_cloexec & m)
 			doclose(j);
+		m >>= 1;
 	}
 	udata.u_cloexec = 0;
 }
@@ -60,50 +25,45 @@ char *name;
 char *argv[];
 char *envp[];
 ********************************************/
-#define name (char *)udata.u_argn
+#define name (uint8_t *)udata.u_argn
 #define argv (char **)udata.u_argn1
 #define envp (char **)udata.u_argn2
 
-/* Magic numbers
-
-	0xC3 xx xx	- Z80 with 0x100 entry
-	0x4C xx xx	- 6502
-	0x7E xx xx	- 6809
-
-   followed by a base page for the executable
-
-*/
-static int header_ok(uint8_t *pp)
+/*
+ *	See exec.h
+ */
+static int header_ok(struct exec *pp)
 {
-	register uint8_t *p = pp;
-	if (*p != EMAGIC && *p != EMAGIC_2)
+	/* Executable ? */
+	if (pp->a_magic != EXEC_MAGIC)
 		return 0;
-	p += 3;
-	if (*p++ != 'F' || *p++ != 'Z' || *p++ != 'X' || *p++ != '1')
+	/* Right CPU type ? */
+	if (pp->a_cpu != sys_cpu)
 		return 0;
-	if (*p && *p != (PROGLOAD >> 8))
+	/* Compatible with this system ? */
+	if ((pp->a_cpufeat & sys_cpu_feat) != pp->a_cpufeat)
 		return 0;
 	return 1;
 }
 
-static uint8_t in_execve;
-
 arg_t _execve(void)
 {
+	/* We aren't re-entrant where this matters */
+	struct exec hdr;
 	staticfast inoptr ino;
-	unsigned char *buf;
 	char **nargv;		/* In user space */
 	char **nenvp;		/* In user space */
 	struct s_argblk *abuf, *ebuf;
 	int argc;
 	uint16_t progptr;
+	uint16_t progload;
 	staticfast uint16_t top;
 	uint16_t bin_size;	/* Will need to be bigger on some cpus */
 	uint16_t bss;
 
 	top = ramtop;
 
-	if (!(ino = n_open(name, NULLINOPTR)))
+	if (!(ino = n_open_lock(name, NULLINOPTR)))
 		return (-1);
 
 	if (!((getperm(ino) & OTH_EX) &&
@@ -113,51 +73,55 @@ arg_t _execve(void)
 		goto nogood;
 	}
 
-	/* Core dump and ptrace permission logic */
-#ifdef CONFIG_LEVEL_2
-	if ((!(getperm(ino) & OTH_RD)) ||
-		(ino->c_node.i_mode & (SET_UID | SET_GID)))
-		udata.u_flags |= U_FLAG_NOCORE;
-	else
-		udata.u_flags &= ~U_FLAG_NOCORE;
-#endif
-
 	setftime(ino, A_TIME);
 
-	if (ino->c_node.i_size == 0) {
+	udata.u_offset = 0;
+	udata.u_count = sizeof(struct exec);
+	udata.u_base = (uint8_t *)&hdr;
+	udata.u_sysio = true;
+
+	readi(ino, 0);
+	if (udata.u_done != sizeof(struct exec)) {
 		udata.u_error = ENOEXEC;
 		goto nogood;
 	}
 
-	/* Read in the first block of the new program */
-	buf = bread(ino->c_dev, bmap(ino, 0, 1), 0);
-
-	if (!header_ok(buf)) {
+	if (!header_ok(&hdr)) {
 		udata.u_error = ENOEXEC;
 		goto nogood2;
 	}
-	top = *(uint16_t *)(buf + 8);
-	if (top == 0)	/* Legacy 'all space' binary */
-		top = ramtop;
-	else	/* Requested an amount, so adjust for the base */
-		top += PROGLOAD;
 
-	bss = *(uint16_t *)(buf + 14);
+	if (pagemap_prepare(&hdr) < 0)
+		goto nogood2;
 
-	/* Binary doesn't fit */
-	bin_size = ino->c_node.i_size;
+	progload = hdr.a_base << 8;
+	top = (hdr.a_base + hdr.a_size) << 8;
+
+	/* For now assume no split I/D. We will need to revisit this and
+	   pagemap_realloc when we add that so that the work is done in
+	   pagemap_realloc and passed back somehow */
+
+	/* top can overflow. We check below */
+	bss = hdr.a_bss;
+
+	bin_size = hdr.a_text + hdr.a_data;
+	/* Does it fit ? */
+	if (bin_size < hdr.a_text || top < progload || bin_size + bss < bin_size) {
+		udata.u_error = ENOMEM;
+		goto nogood2;
+	}
 	progptr = bin_size + 1024 + bss;
-	if (top - PROGBASE < progptr || progptr < bin_size) {
+	if (bin_size < 64 || progload < PROGLOAD || top - progload < progptr || progptr < bin_size) {
 		udata.u_error = ENOMEM;
 		goto nogood2;
 	}
 
-	/* We can't allow multiple execs to occur beyond this point at once
-	   otherwise we may deadlock out of buffers. As we already assume
-	   synchronous block I/O on 8bit boxes this isn't really a hit at all */
-	while(in_execve)
-		psleep(&in_execve);
-	in_execve = 1;
+	udata.u_ptab->p_status = P_NOSLEEP;
+
+	/* If we made pagemap_realloc keep hold of some defined area we
+	   could in theory just move the arguments up or down as part of
+	   the process - that would save us all this hassle but replace it
+	   with new hassle */
 
 	/* Gather the arguments, and put them in temporary buffers. */
 	abuf = (struct s_argblk *) tmpbuf();
@@ -169,10 +133,22 @@ arg_t _execve(void)
 		goto nogood3;	/* SN */
 
 	/* This must be the last test as it makes changes if it works */
-	if (pagemap_realloc(top - MAPBASE))
+	/* This is only safe from deadlocks providing pagemap_realloc doesn't
+	   sleep */
+	if (pagemap_realloc(&hdr, top - MAPBASE))
 		goto nogood3;
 
 	/* From this point on we are commmited to the exec() completing */
+
+	/* Core dump and ptrace permission logic */
+#ifdef CONFIG_LEVEL_2
+	/* Q: should uid == 0 mean we always allow core */
+	if ((!(getperm(ino) & OTH_RD)) ||
+		(ino->c_node.i_mode & (SET_UID | SET_GID)))
+		udata.u_flags |= U_FLAG_NOCORE;
+	else
+		udata.u_flags &= ~U_FLAG_NOCORE;
+#endif
 	udata.u_top = top;
 	udata.u_ptab->p_top = top;
 
@@ -186,37 +162,32 @@ arg_t _execve(void)
 	/* FIXME: In the execve case we may on some platforms have space
 	   below PROGLOAD to clear... */
 
-	/* We are definitely going to succeed with the exec,
-	 * so we can start writing over the old program
+	/*
+	 * We place the stubs below the program in the hole left by the
+	 * header. It's like the Linux VDSO except that it's not virtual
+	 * not dynamic and not shared 8).
 	 */
-	uput(buf, (uint8_t *)PROGLOAD, 512);	/* Move 1st Block to user bank */
-	brelse(buf);
-
+	uput(sys_stubs, (uint8_t *)progload, sizeof(struct exec));
 	/* At this point, we are committed to reading in and
-	 * executing the program. This call can block. */
+	 * executing the program. This call must not block. */
 
 	close_on_exec();
 
 	/*
-	 *  Read in the rest of the program, block by block
-	 *  We use bufdiscard so that we load the entire app through the
-	 *  same buffer to avoid cycling our small cache on this. Indirect blocks
-	 *  will still be cached. - Hat tip to Steve Hosgood's OMU for that trick
+	 *  Read in the rest of the program, block by block. We rely upon
+	 *  the optimization path in readi to spot this is a big move to user
+	 *  space and move it directly.
 	 */
-	progptr = PROGLOAD + 512;	// we copied the first block already
 
-	/* Compute this once otherwise each loop we must recalculate this
-	   as the compiler isn't entitled to assume the loop didn't change it */
-
-	if (bin_size > 512) {
-		bin_size -= 512;
-		if (bload(ino, 1, progptr, bin_size) < 0) {
-			/* Must not run userspace */
-			ssig(udata.u_ptab, SIGKILL);
-			goto nogood3;
-		}
-		progptr += bin_size;
-	}
+	progptr = progload + sizeof(struct exec);
+	bin_size -= sizeof(struct exec);
+	udata.u_base = (uint8_t *)progptr;		/* We copied the first block already */
+	udata.u_count = bin_size;
+	udata.u_sysio = false;
+	readi(ino, 0);
+	if (udata.u_done != bin_size)
+		goto nogood4;
+	progptr += bin_size;
 
 	/* Wipe the memory in the BSS. We don't wipe the memory above
 	   that on 8bit boxes, but defer it to brk/sbrk() */
@@ -234,15 +205,17 @@ arg_t _execve(void)
 	nargv = wargs(((char *) top - 2), abuf, &argc);
 	nenvp = wargs((char *) (nargv), ebuf, NULL);
 
-	// Fill in udata.u_name with Program invocation name
-	ugets((void *) ugetw(nargv), udata.u_name, 8);
+	// Fill in udata.u_name with program invocation name
+	uget((void *) ugetw(nargv), udata.u_name, 8);
 	memcpy(udata.u_ptab->p_name, udata.u_name, 8);
 
-	brelse(abuf);
-	brelse(ebuf);
+	tmpfree(abuf);
+	tmpfree(ebuf);
 	i_deref(ino);
 
-	// Shove argc and the address of argv just below envp
+	/* Shove argc and the address of argv just below envp
+	   FIXME: should flip them in crt0.S of app for R2L setups
+	   so we can get rid of the ifdefs */
 #ifdef CONFIG_CALL_R2L	/* Arguments are stacked the 'wrong' way around */
 	uputw((uint16_t) nargv, nenvp - 2);
 	uputw((uint16_t) argc, nenvp - 1);
@@ -251,24 +224,24 @@ arg_t _execve(void)
 	uputw((uint16_t) argc, nenvp - 2);
 #endif
 
-	// Set stack pointer for the program
+	/* Set stack pointer for the program */
 	udata.u_isp = nenvp - 2;
 
-	// Start execution (never returns)
-	in_execve = 0;
-	wakeup(&in_execve);
-	doexec(PROGLOAD);
+	/* Start execution (never returns) */
+	udata.u_ptab->p_status = P_RUNNING;
+	doexec(progload + hdr.a_entry);
 
-	// tidy up in various failure modes:
+	/* tidy up in various failure modes */
+nogood4:
+	/* Must not run userspace */
+	ssig(udata.u_ptab, SIGKILL);
 nogood3:
-	brelse(abuf);
-	brelse(ebuf);
-	in_execve = 0;
-	wakeup(&in_execve);
-      nogood2:
-	brelse(buf);
-      nogood:
-	i_deref(ino);
+	udata.u_ptab->p_status = P_RUNNING;
+	tmpfree(abuf);
+	tmpfree(ebuf);
+nogood2:
+nogood:
+	i_unlock_deref(ino);
 	return (-1);
 }
 
@@ -380,39 +353,46 @@ uint8_t write_core_image(void)
 
 	udata.u_error = 0;
 
-	ino = kn_open("core", &parent);
+	/* FIXME: need to think more about the case sp is lala */
+	if (uput("core", udata.u_syscall_sp - 5, 5))
+		return 0;
+
+	ino = n_open(udata.u_syscall_sp - 5, &parent);
 	if (ino) {
 		i_deref(parent);
 		return 0;
 	}
-	if (parent && (ino = newfile(parent, "core"))) {
-		ino->c_node.i_mode = F_REG | 0400;
-		setftime(ino, A_TIME | M_TIME | C_TIME);
-		wr_inode(ino);
-		f_trunc(ino);
+	if (parent) {
+		i_lock(parent);
+		if (ino = newfile(parent, "core")) {
+			ino->c_node.i_mode = F_REG | 0400;
+			setftime(ino, A_TIME | M_TIME | C_TIME);
+			wr_inode(ino);
+			f_trunc(ino);
 
-		/* FIXME: need to add some arch specific header bits, and
-		   also pull stuff like the true sp and registers out of
-		   the return stack properly */
+			/* FIXME: need to add some arch specific header bits, and
+			   also pull stuff like the true sp and registers out of
+			   the return stack properly */
 
-		corehdr.ch_base = MAPBASE;
-		corehdr.ch_break = udata.u_break;
-		corehdr.ch_sp = udata.u_syscall_sp;
-		corehdr.ch_top = PROGTOP;
-		udata.u_offset = 0;
-		udata.u_base = (uint8_t *)&corehdr;
-		udata.u_sysio = true;
-		udata.u_count = sizeof(corehdr);
-		writei(ino, 0);
-		udata.u_sysio = false;
-		udata.u_base = MAPBASE;
-		udata.u_count = udata.u_break - MAPBASE;
-		writei(ino, 0);
-		udata.u_base = udata.u_sp;
-		udata.u_count = PROGTOP - (uint16_t)udata.u_sp;
-		writei(ino, 0);
-		i_deref(ino);
-		return W_COREDUMP;
+			corehdr.ch_base = MAPBASE;
+			corehdr.ch_break = udata.u_break;
+			corehdr.ch_sp = udata.u_syscall_sp;
+			corehdr.ch_top = PROGTOP;
+			udata.u_offset = 0;
+			udata.u_base = (uint8_t *)&corehdr;
+			udata.u_sysio = true;
+			udata.u_count = sizeof(corehdr);
+			writei(ino, 0);
+			udata.u_sysio = false;
+			udata.u_base = MAPBASE;
+			udata.u_count = udata.u_break - MAPBASE;
+			writei(ino, 0);
+			udata.u_base = udata.u_sp;
+			udata.u_count = PROGTOP - (uint16_t)udata.u_sp;
+			writei(ino, 0);
+			i_unlock_deref(ino);
+			return W_COREDUMP;
+		}
 	}
 	return 0;
 }

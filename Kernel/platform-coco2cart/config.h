@@ -6,8 +6,6 @@
 #undef CONFIG_PROFIL
 /* Multiple processes in memory at once */
 #undef CONFIG_MULTI
-/* Single tasking - for now while we get it booting */
-#undef CONFIG_SINGLETASK
 /* Pure swap */
 #define CONFIG_SWAP_ONLY
 #define CONFIG_SPLIT_UDATA
@@ -16,7 +14,7 @@
 #define CONFIG_BANKS	1
 /* And swapping */
 
-extern unsigned int cocoswap_dev;
+extern uint16_t cocoswap_dev;
 
 #define SWAPDEV     cocoswap_dev    /* Uses part of IDE slice 0 or SD 0*/
 #define SWAP_SIZE   0x40	/* 32K in 512 byte blocks */
@@ -26,7 +24,7 @@ extern unsigned int cocoswap_dev;
 #define MAX_SWAPS   32
 
 /* Permit large I/O requests to bypass cache and go direct to userspace */
-#define CONFIG_LARGE_IO_DIRECT
+#define CONFIG_LARGE_IO_DIRECT(x)	1
 
 /* Video terminal, not a serial tty */
 #define CONFIG_VT
@@ -61,7 +59,11 @@ extern unsigned int cocoswap_dev;
 #define NDEVS    2        /* Devices 0..NDEVS-1 are capable of being mounted */
                           /*  (add new mountable devices to beginning area.) */
 #define TTYDEV   513	 /* Device used by kernel for messages, panics */
-#define NBUFS    6       /* Number of block buffers */
+#define NBUFS    5       /* Number of block buffers */
 #define NMOUNTS	 2	  /* Number of mounts at a time */
 #define swap_map(x)	((uint8_t *)(x))
 
+#define CONFIG_IDE
+#define platform_copyright()
+
+#define BOOTDEVICENAMES "hd#"

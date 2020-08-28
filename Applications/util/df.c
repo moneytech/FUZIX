@@ -2,17 +2,15 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <errno.h>
-
-/* Assumed length of a line in /etc/mtab */
-#define MTAB_LINE 160
+#include <mntent.h>
 
 const char *devname(dev_t);
 const char *mntpoint(const char *);
-void df_path(const char *path);
-void df_dev(dev_t dev);
+void df_path(const char *path, const char *dpath, const char *mntpath);
 void df_all(void);
 
 int iflag=0, kflag=0, fflag=0;
@@ -50,7 +48,7 @@ int main(int argc, char *argv[])
 
     if (i < argc) {
         for (; i < argc; ++i) {
-            df_path(argv[i]);
+            df_path(argv[i], NULL, NULL);
         }
     } else {
         df_all();
@@ -59,79 +57,67 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-void df_path(const char *path)
+void df_path(const char *path, const char *dpath, const char *mpath)
 {
-    struct stat sbuf;
+    static struct statvfs vfs;
+    static struct stat st;
+    /* We do not currently need the extra bits here but will in future with
+       any kind of block extent scaling */
+    unsigned long total, used, unused;
+    unsigned int percent;
 
-    if(stat(path, &sbuf) < 0){
+    if (statvfs(path, &vfs) < 0 || stat(path, &st) < 0) {
         fprintf(stderr, "df: \"%s\": %s\n", path, strerror(errno));
-    }else{
-        df_dev(sbuf.st_dev);
-    }
-}
-
-void df_dev(dev_t dev)
-{
-    unsigned int Total, Used, Free, Percent;
-    struct _uzifilesys fsys;
-    const char *dn;
-
-    dn = devname(dev);
-
-    if(_getfsys(dev, &fsys)){
-        fprintf(stderr, "df: _getfsys(%d): %s\n", dev, strerror(errno));
         return;
     }
 
-    if(iflag){
+    if (dpath == NULL)
+        dpath = devname(st.st_dev);
+    if (mpath == NULL)
+        mpath = mntpoint(dpath);
+
+    if (iflag) {
 	/* inodes */
-	Total = 8 * (fsys.s_isize - 2);
-	Used  = Total - fsys.s_tinode;
-	Free  = fsys.s_tinode;
-    }else{
-	/* blocks */
-	Total = fsys.s_fsize;
-	Used  = Total - fsys.s_isize - fsys.s_tfree;
-	Free  = fsys.s_tfree;
+	total = vfs.f_files;
+	unused  = vfs.f_favail;
+    } else {
+	/* blocks in 512 byte counts */
+	total = vfs.f_blocks * (vfs.f_bsize / 512);
+	unused  = vfs.f_bavail * (vfs.f_bsize / 512);
     }
+    used  = total - unused;
 
+    /* Are we working in Kbytes or blocks ? */
     if (!iflag && kflag) {
-        Total /= 2;
-        Used /= 2;
-        Free /= 2;
+        total /= 2;
+        used /= 2;
+        unused /= 2;
     }
 
-    Percent = Total / 100;
+    percent = total / 100;
 
     if (fflag) {
-	if(Percent)
-	    Percent = Free / Percent;
+	if(percent)
+	    percent = unused / percent;
     } else {
-	if(Percent)
-	    Percent = Used / Percent;
+	if(percent)
+	    percent = used / percent;
     }
 
-    printf("%-16s %6u %6u %6u %5u%% %s\n",
-            dn, Total, Used, Free, Percent,
-            fsys.s_mntpt ? mntpoint(dn) : (const char*) "/");
+    printf("%-16s %6lu %6lu %6lu %5u%% %s\n",
+            dpath, total, used, unused, percent, mpath);
 }
 
 void df_all(void)
 {
     FILE *f;
-	char tmp[MTAB_LINE];
-	char* dev;
-	char* mntpt;
+    struct mntent *mnt;
     
-    f = fopen("/etc/mtab", "r");
+    f = setmntent("/etc/mtab", "r");
     if (f) {
-        while (fgets(tmp, MTAB_LINE, f)) {
-	    dev = strtok(tmp, " ");
-	    mntpt = strtok(NULL, " ");
-            if (mntpt)
-                df_path(mntpt);
-        }
-        fclose(f);
+        while (mnt = getmntent(f))
+                df_path(mnt->mnt_dir, mnt->mnt_fsname, mnt->mnt_dir);
+        endmntent(f);
     } else {
         fprintf(stderr, "df: cannot open /etc/mtab: %s\n", strerror(errno));
     }
@@ -173,21 +159,17 @@ const char *devname(dev_t devno)
 const char *mntpoint(const char *devname)
 {
     FILE *f;
-	char tmp[MTAB_LINE];
-	char* dev;
-	char* mntpt;
+    struct mntent *mnt;
     
-    f = fopen("/etc/mtab", "r");
+    f = setmntent("/etc/mtab", "r");
     if (f) {
-        while (fgets(tmp, sizeof(tmp), f)) {
-			dev = strtok(tmp, " ");
-			mntpt = strtok(NULL, " ");
-            if (strcmp(dev, devname) == 0) {
-                fclose(f);
-                return strdup(mntpt);
+        while (mnt = getmntent(f)) {
+            if (strcmp(mnt->mnt_fsname, devname) == 0) {
+                endmntent(f);
+                return strdup(mnt->mnt_dir);
             }
         }
-        fclose(f);
+        endmntent(f);
     }
 
     return "???";

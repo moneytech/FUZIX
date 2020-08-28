@@ -14,22 +14,28 @@
         .globl hw_irqvector
         .globl _irqvector
         .globl _need_resched
+	.globl _int_disabled
+	.globl _udata
 
         ; imported symbols
         .globl _ramsize
         .globl _procmem
-        .globl _newproc
+        .globl _makeproc
+	.globl _udata
         .globl _runticks
         .globl _chksigs
         .globl _inint
         .globl _getproc
-        .globl _trap_monitor
+        .globl _platform_monitor
         .globl _switchin
-        .globl _switchout
+        .globl _platform_switchout
         .globl _dofork
+	.globl map_buffers
         .globl map_kernel
         .globl map_process_always
-        .globl map_save
+        .globl map_kernel_di
+        .globl map_process_always_di
+        .globl map_save_kernel
         .globl map_restore
         .globl unix_syscall_entry
         .globl null_handler
@@ -44,7 +50,7 @@
 
         .include "kernel.def"
         .include "../cpu-z180/z180.def"
-        .include "../kernel.def"
+        .include "../kernel-z80.def"
 
 ; -----------------------------------------------------------------------------
 ; Initialisation code
@@ -257,10 +263,18 @@ _copy_and_map_process:
         ; CPU stalled until DMA completes
 
         ; Copy common memory code from kernel bank (from end of U_DATA to end of memory)
-        ld de, #(0x10000 - U_DATA__TOTALSIZE - U_DATA) ; copy to end of memory
+	;  ld de, #(0x10000 - U_DATA__TOTALSIZE - _udata) ; copy to end of memory
+	; Only the linker isn't smart enough....
+	or a
+	push hl
+	ld hl,#0
+	ld de,#_udata + U_DATA__TOTALSIZE
+	sbc hl,de
+	ex de,hl
+	pop hl
         out0 (DMA_BCR0H), d     ; set byte count
         out0 (DMA_BCR0L), e
-        ld de, #(U_DATA+U_DATA__TOTALSIZE)
+        ld de, #(_udata + U_DATA__TOTALSIZE)
         ld a, #((OS_BANK + FIRST_RAM_BANK) >> 4)    ; source bank -- kernel is always 64K aligned
         out0 (DMA_SAR0B), a
         out0 (DMA_SAR0H), d     ; source is kernel, always 64K aligned
@@ -302,7 +316,7 @@ bankok2:out0 (DMA_DAR0B), a
         out0 (DMA_SAR0L), a
         out0 (DMA_SAR0H), l
         out0 (DMA_SAR0B), h
-        ld de, #(U_DATA + U_DATA__TOTALSIZE - 0x100) ; byte count
+        ld de, #(_udata + U_DATA__TOTALSIZE - 0x100) ; byte count
         out0 (DMA_BCR0H), d     ; set byte count
         out0 (DMA_BCR0L), e
         ; call dump_dma_state
@@ -367,7 +381,7 @@ _dofork:
         ; _switchin which will immediately return (appearing to be _dofork()
         ; returning) and with HL (ie return code) containing the child PID.
         ; Hooray.
-        ld (U_DATA__U_SP), sp
+        ld (_udata + U_DATA__U_SP), sp
 
         ; now we're in a safe state for _switchin to return in the parent
         ; process.
@@ -387,10 +401,13 @@ _dofork:
         pop bc
 
         ; Make a new process table entry, etc.
+	ld hl, #_udata
+	push hl
         ld hl, (fork_proc_ptr)
         push hl
-        call _newproc
+        call _makeproc
         pop bc 
+	pop bc
 
         ; runticks = 0;
         ld hl, #0
@@ -569,6 +586,7 @@ interrupt_table:
 hw_irqvector:	.db 0
 _irqvector:	.db 0
 _need_resched:	.db 0
+_int_disabled:	.db 0
 
 z80_irq:
         push af
@@ -597,9 +615,6 @@ z180_irqgo:
         ;    call outchar
         pop af
         jp interrupt_handler
-        ; this isn't perfect -- interrupt_handler always ends with RETI while only
-        ; INT0 should end with RETI, the others ending with a normal RET. unless
-        ; there are Z80 interrupt peripherals on the bus we'll be OK.
 
 ; z180_irq4:
 ;         push af
@@ -674,20 +689,16 @@ z180_irq_unused:
 ; possibly the same process, and switches it in.  When a process is
 ; restarted after calling switchout, it thinks it has just returned
 ; from switchout().
-; 
-; This function can have no arguments or auto variables.
-_switchout:
-        di
-        call _chksigs
+_platform_switchout:
+	di
         ; save machine state
-
         ld hl, #0 ; return code set here is ignored, but _switchin can 
         ; return from either _switchout OR _dofork, so they must both write 
         ; U_DATA__U_SP with the following on the stack:
         push hl ; return code
         push ix
         push iy
-        ld (U_DATA__U_SP), sp ; this is where the SP is restored in _switchin
+        ld (_udata + U_DATA__U_SP), sp ; this is where the SP is restored in _switchin
 
         ; no need to stash udata on this platform since common memory is dedicated
         ; to each process.
@@ -699,7 +710,7 @@ _switchout:
         call _switchin
 
         ; we should never get here
-        jp _trap_monitor
+        jp _platform_monitor
 
 badswitchmsg: .ascii "_switchin: FAIL"
             .db 13, 10, 0
@@ -725,17 +736,38 @@ _switchin:
         ; memory and the stack under our feet so let's hope that common memory
         ; contains a copy of this code, eh?
         ld a, (hl)
+
+.ifne CONFIG_SWAP
+	.globl _swapper
+
+	or a
+	jr nz, is_resident
+	; Swap in the new process (and maybe out an old one)
+	ei
+	xor a
+	ld (_int_disabled),a
+	push hl
+	push de
+	call _swapper
+	pop de
+	pop hl
+	ld a,#1
+	ld (_int_disabled),a
+	di
+	ld a,(hl)
+.endif
+is_resident:
         ; out0 (MMU_BBR), a -- WRS: leave the kernel mapped in
         out0 (MMU_CBR), a
 
         ; sanity check: u_data->u_ptab matches what we wanted?
-        ld hl, (U_DATA__U_PTAB) ; u_data->u_ptab
+        ld hl, (_udata + U_DATA__U_PTAB) ; u_data->u_ptab
         or a                    ; clear carry flag
         sbc hl, de              ; subtract, result will be zero if DE==IX
         jr nz, switchinfail
 
         ; wants optimising up a bit
-        ld ix, (U_DATA__U_PTAB)
+        ld ix, (_udata + U_DATA__U_PTAB)
         ; next_process->p_status = P_RUNNING
         ld P_TAB__P_STATUS_OFFSET(ix), #P_RUNNING
 
@@ -752,14 +784,15 @@ _switchin:
 
         ; restore machine state -- note we may be returning from either
         ; _switchout or _dofork
-        ld sp, (U_DATA__U_SP)
+        ld sp, (_udata + U_DATA__U_SP)
 
         pop iy
         pop ix
         pop hl ; return code
 
         ; enable interrupts, if the ISR isn't already running
-        ld a, (U_DATA__U_ININTERRUPT)
+        ld a, (_udata + U_DATA__U_ININTERRUPT)
+	ld (_int_disabled),a
         or a
         ret nz ; in ISR, leave interrupts off
         ei
@@ -770,8 +803,10 @@ switchinfail:
         call outhl
         ld hl, #badswitchmsg
         call outstring
-        jp _trap_monitor
+        jp _platform_monitor
 
+map_buffers:
+map_kernel_di:
 map_kernel: ; map the kernel into the low 60K, leaves common memory unchanged
         push af
 .if DEBUGBANK
@@ -783,13 +818,14 @@ map_kernel: ; map the kernel into the low 60K, leaves common memory unchanged
         pop af
         ret
 
+map_process_always_di:
 map_process_always: ; map the process into the low 60K based on current common mem (which is unchanged)
         push af
 .if DEBUGBANK
         ld a, #'='
         call outchar
 .endif
-        ld a, (U_DATA__U_PAGE)
+        ld a, (_udata + U_DATA__U_PAGE)
         out0 (MMU_BBR), a
 .if DEBUGBANK
         call outcharhex
@@ -798,10 +834,16 @@ map_process_always: ; map the process into the low 60K based on current common m
         pop af
         ret
 
-map_save:   ; save the current process/kernel mapping
+map_save_kernel:   ; save the current process/kernel mapping
         push af
         in0 a, (MMU_BBR)
         ld (map_store), a
+.if DEBUGBANK
+        ld a, #'S'
+        call outchar
+.endif
+        ld a, #(OS_BANK + FIRST_RAM_BANK)
+        out0 (MMU_BBR), a
         pop af
         ret
 

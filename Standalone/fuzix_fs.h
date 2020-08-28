@@ -32,12 +32,7 @@
 
 extern int dev_fd;
 extern int dev_offset;
-int fd_open(char *name);
 void panic(char *s);
-
-extern uint16_t swizzle16(uint32_t v);
-extern uint32_t swizzle32(uint32_t v);
-extern int swizzling;
 
 typedef struct s_queue {
     char *q_base;    /* Pointer to data */
@@ -71,7 +66,7 @@ typedef struct direct {
 typedef uint16_t blkno_t;    /* Can have 65536 512-byte blocks in filesystem */
 
 typedef struct blkbuf {
-    char        bf_data[512];    /* This MUST be first ! */
+    uint8_t     bf_data[512];    /* This MUST be first ! */
     char        bf_dev;
     blkno_t     bf_blk;
     char        bf_dirty;
@@ -129,18 +124,19 @@ typedef struct cinode {
 } cinode, *inoptr;
 
 typedef struct filesys {
-    uint16_t      s_mounted;
-    uint16_t      s_isize;
-    uint16_t      s_fsize;
-    int16_t       s_nfree;
+    uint16_t    s_mounted;
+    uint16_t    s_isize;
+    uint16_t    s_fsize;
+    int16_t     s_nfree;
     blkno_t     s_free[50];
-    int16_t       s_ninode;
-    uint16_t      s_inode[50];
-    uint8_t       s_fmod;
+    int16_t     s_ninode;
+    uint16_t    s_inode[50];
+    uint8_t     s_fmod;
     uint8_t	s_timeh;	/* top bits of time */
-    uint32_t      s_time;
+    uint32_t    s_time;
     blkno_t     s_tfree;
-    uint16_t      s_tinode;
+    uint16_t    s_tinode;
+    uint8_t	s_shift;
     inoptr      s_mntpt;
 } filesys, *fsptr;
 
@@ -237,17 +233,15 @@ static struct filesys fs_tab[1];
 static struct blkbuf bufpool[NBUFS];
 static struct u_data udata;
 static void bufsync (void);
-static char *zerobuf (void);
+static uint8_t *zerobuf (void);
 static void brelse(bufptr bp);
 static void bawrite(bufptr bp);
 static int bfree(bufptr bp, int dirty);
-static int bdwrite(bufptr bp);
-static int bdread(bufptr bp);
 static void bufinit(void);
 static bufptr bfind(int dev, blkno_t blk);
 static bufptr freebuf(void);
 static void magic(inoptr ino);
-static char *bread(int dev, blkno_t blk, int rewrite);
+static uint8_t *bread(int dev, blkno_t blk, int rewrite);
 static int fmount(int dev, inoptr ino);
 static void i_ref(inoptr ino);
 static void xfs_end(void);
@@ -257,8 +251,8 @@ static int fuzix_creat(char *name, int16_t mode);
 static int fuzix_close(int16_t uindex);
 static int fuzix_link( char *name1, char *name2);
 static int fuzix_unlink(char *path);
-static int fuzix_read( int16_t d, char *buf, uint16_t nbytes);
-static int fuzix_write( int16_t d, char *buf, uint16_t nbytes);
+static uint16_t fuzix_read( int16_t d, char *buf, uint16_t nbytes);
+static uint16_t fuzix_write( int16_t d, char *buf, uint16_t nbytes);
 static int fuzix_mknod( char *name, int16_t mode, int16_t dev);
 static int fuzix_mkdir(char *name, int mode);
 static blkno_t bmap(inoptr ip, blkno_t bn, int rwflg);
@@ -271,8 +265,8 @@ static void freeblk(int dev, blkno_t blk, int level);
 static void setftime(inoptr ino, int flag);
 static void wr_inode(inoptr ino);
 static int isdevice(inoptr ino);
-static void readi( inoptr ino );
-static void writei( inoptr ino);
+static uint16_t readi( inoptr ino );
+static uint16_t writei( inoptr ino);
 static void updoff(int d);
 static void validblk(int dev, blkno_t num);
 static inoptr getinode(int uindex);
@@ -298,10 +292,8 @@ static int fuzix_chmod( char *path, int16_t mode);
 static int fuzix_stat( char *path, struct uzi_stat *buf);
 static void stcpy( inoptr ino, struct uzi_stat *buf);
 static int fuzix_getfsys(int dev,char * buf);
-static int fuzix_mount( char *spec, char *dir, int rwflag);
 static int fuzix_getmode(inoptr ino);
 static void bawrite(bufptr bp);
 static int bfree(bufptr bp, int dirty);
-static int fuzix_umount( char *spec);
 
 #endif

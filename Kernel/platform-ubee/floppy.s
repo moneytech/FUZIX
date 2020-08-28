@@ -1,5 +1,5 @@
 ;
-;	Core floppy routines for the TRS80 1791 FDC
+;	Core floppy routines for the Microbee 2791 FDC
 ;	Based on the 6809 code
 ;
 ;	FIXME: double sided media
@@ -11,6 +11,9 @@
 	.globl _fd_operation
 	.globl _fd_motor_on
 	.globl fd_nmi_handler
+
+	.globl map_kernel
+	.globl map_process_always
 
 FDCREG	.equ	0x40
 FDCTRK	.equ	0x41
@@ -39,6 +42,7 @@ TRACK	.equ	1
 SECTOR	.equ	2
 DIRECT	.equ	3		; 0 = read 2 = write 1 = status
 DATA	.equ	4
+USER	.equ	6
 
 	.area	_COMMONMEM
 ;
@@ -169,27 +173,32 @@ fdiosetup:
 	out	(FDCSEC), a
 	in	a, (FDCREG)	; Clear any pending status
 
-	ld	a, CMD(ix)
+	ld	c, CMD(ix)
 
 	ld	de, #0		; timeout handling
 	
-	out	(FDCREG), a	; issue the command
-	ld	b, #0
-rwiowt:	djnz	rwiowt
 	ld	a, DIRECT(ix)
 	dec	a
 	ld	a, (fdcctrl)
 	ld	d, a			; we need this in a register
 					; to meet timing
+	ld	a, USER(ix)
+	or	a
+	call	nz, map_process_always
+
 	ld	a, #1
 	ld	(fdc_active), a		; NMI pop and jump
 	jr	z, fdio_in
 	jr	nc, fdio_out
+	ld	a,c
+	out	(FDCREG), a		; issue the command
 ;
-;	Status registers
+;	Status registers. At this point A also holds the state returned
+;	from the FDCREG poll for data xfers but we dont currently use it.
 ;
 fdxferdone:
 	ei
+	call	map_kernel
 fdxferdone2:
 	xor	a
 	ld	(fdc_active), a
@@ -204,55 +213,46 @@ fdxferdone2:
 ;	Read from the disk - HL points to the target buffer
 ;
 fdio_in:
+	ld	a,c
 	ld	e, #0x16		; bits to check
 	ld	bc, #FDCDATA		; 512 bytes/sector, c is our port
-fdio_inl:
+	out	(FDCREG), a		; issue the command
+	di
+fdio_in1:
 	in	a, (FDCREG)
 	and	e
-	jr	z, fdio_inl
+	jr	z, fdio_in1
 	ini
-	di
-	ld	a, d
-fdio_inbyte:
-	out	(FDCCTRL), a		; stalls
+	jr	nz, fdio_in1
+fdio_in2:
+	in	a, (FDCREG)
+	and	e
+	jr	z, fdio_in2
 	ini
-	jr	nz, fdio_inbyte
-fdio_inbyte2:
-	out	(FDCCTRL), a		; stalls
-	ini
-	jr	nz, fdio_inbyte2
+	jr	nz, fdio_in2
 	jr	fdxferdone
 
 ;
 ;	Read from the disk - HL points to the target buffer
 ;
 fdio_out:
-	set	6,d			; halt mode bit
+	ld	a, c
 	ld	c, #FDCDATA		; C is our port
 	ld	e, #0x76
-fdio_outl:
+	out	(FDCREG), a		; issue the command
+	di
+fdio_out1:
 	in	a, (FDCREG)		; Wait for DRQ (or error)
 	and	e
-	jr	z, fdio_outl
+	jr	z, fdio_out1
 	outi				; Stuff byte into FDC while we think
-	di
-	in	a, (FDCREG)		; No longer busy ??
-	rra
-	jr	nc, fdxferbad		; Bugger... 
-	ld	b, (hl)			; Next byte
-	inc	hl
-fdio_waitlock:
-	ld	a, d
-	out	(FDCCTRL), a		; wait states on
-	in	a, (FDCREG)
+	jr	nz,fdio_out1
+fdio_out2:
+	in	a, (FDCREG)		; Wait for DRQ (or error)
 	and	e
-	jr	z, fdio_waitlock
-	out	(c), b
-	ld	a, d
-fdio_outbyte:
-	out	(FDCCTRL), a		; stalls
-	outi
-	jr	fdio_outbyte
+	jr	z, fdio_out2
+	outi				; Stuff byte into FDC while we think
+	jr	nz,fdio_out2
 fdio_nmiout:
 ;
 ;	Now tidy up
@@ -343,17 +343,10 @@ _fd_motor_on:
 	push	hl
 	push	de
 	;
-	;	Select drive B
+	;	Select drive
 	;
-	cp	l
-	jr	z,  was_selected
-;
-;	Select our drive
-;
-notsel:
 	ld	a, l
 	out 	(FDCCTRL), a
-	out	(FDCCTRL), a	; TRS80 erratum apparently needs this
 	ld	(fdcctrl), a
 	ld	bc, #0x7F00	; Long delay (may need FE or FF for some disks)
 	call	nap
@@ -363,7 +356,6 @@ notsel:
 ;
 ;	All is actually good
 ;
-was_selected:
 	ld	hl, #0
 	ret
 

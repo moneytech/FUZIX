@@ -12,7 +12,7 @@
 #include <errno.h>
 #include <getopt.h>
 
-#define NBANKS	4
+#define NBANKS	5
 
 unsigned char buf[NBANKS][65536];
 unsigned int size[NBANKS];
@@ -153,9 +153,12 @@ void code_reloc(uint8_t sbank, uint16_t ptr, uint8_t dbank)
   }
 
   switch(buf[sbank][ptr-1]) {
+    case 0x01:	/* LD BC, */
+    case 0x11:	/* LD DE, */
+    case 0x21:	/* LD HL/IX/IY, */
     case 0xC3:	/* JP - needs stub */
       if (v)
-        printf("Converting JP at %04x to stub\n", ptr);
+        printf("Converting %02x at %04x to stub\n", buf[sbank][ptr-1], ptr);
       da = stubmap(buf[sbank][ptr] + (buf[sbank][ptr+1] << 8), sbank, dbank);
       buf[sbank][ptr] = da & 0xFF;
       buf[sbank][ptr+1] = da >> 8;
@@ -181,8 +184,8 @@ void code_reloc(uint8_t sbank, uint16_t ptr, uint8_t dbank)
       buf[sbank][ptr] = da >> 8;
       break;
     default:
-      fprintf(stderr, "Bad relocation in code %04X: %02X\n",
-        ptr-1, buf[sbank][ptr-1]);
+      fprintf(stderr, "Bad relocation in code (%02X)%04X: %02X\n",
+        sbank, ptr-1, buf[sbank][ptr-1]);
   }
 }
 
@@ -219,14 +222,18 @@ int stub_code(char *name)
     return 1;
   if(strcmp(name, "_COMMONMEM") == 0)
     return 1;
-  if(strcmp(name, "_DISCARD") == 0)
+  if(strncmp(name, "_DISCARD", 8) == 0)
     return 1;
   if(strncmp(name, "_BOOT", 5) == 0)
     return 1;
   /* Data */
+  if(strcmp(name, "_COMMONDATA") == 0)
+    return 0;
   if(strcmp(name, "_INITIALIZER") == 0)
     return 0;
-  if(strcmp(name, "_DATA") == 0)
+  if(strncmp(name, "_DATA", 5) == 0)
+    return 0;
+  if(strncmp(name, "_BUFFERS", 8) == 0)
     return 0;
   if(strcmp(name, "_FONT") == 0)
     return 0;
@@ -240,13 +247,19 @@ static void process_stub(char *p)
 {
   int b1, b2, addr;
   char name[65];
+  char sname[65];
 
   if (strlen(p) > 4 && !isspace(p[8]))
     fprintf(stderr, "Overflow: %s", p);
-  if (sscanf(p, "%02x %04x %02x %64s", &b1, &addr, &b2, name) != 4) {
+  if (sscanf(p, "%02x %04x %02x %64s %64s", &b1, &addr, &b2, name, sname) != 5) {
     fprintf(stderr, "Invalid relocation link %s\n", p);
     exit(1);
   }
+  /* A data relocation into another bank of data is treated as deliberate.
+     We can't do much else. It's not code so we can't patch it, and if it's
+     a data pointer (as it should be) then a relocation is nonsense! */
+  if (!stub_code(sname) && !stub_code(name))
+    return;
   /* If we are stubbing the lot then code is handled as data is */
   if (stub_code(name) && !stub_all)
     code_reloc(b1, addr, b2);
@@ -353,7 +366,7 @@ int main(int argc, char *argv[])
     exit(1);
   }
 
-  for (banks = 0; banks < 4; banks ++) {  
+  for (banks = 0; banks < NBANKS; banks ++) {
     if (banks == 0)
     strcpy(bin, "common.bin");
     else
@@ -388,7 +401,7 @@ int main(int argc, char *argv[])
   move_initializers();
   zero_data();		/* For SNA mode */
 
-  for (banks = 0; banks < 4; banks++) {
+  for (banks = 0; banks < NBANKS; banks++) {
     if (fptr[banks]) {
       /* Just conceivably we might reloc a trailing zero byte and need to grow the
        file */
@@ -401,6 +414,6 @@ int main(int argc, char *argv[])
     }
   }
   printf("%d stub relocations using %d bytes, %d duplicates\n",
-    stubct, stubct * 4, stubdup);
+    stubct, stubct * 6, stubdup);
   exit(0);
 }

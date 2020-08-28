@@ -17,9 +17,11 @@
 #include <devide.h>
 #include <blkdev.h>
 
-bool devide_wait(uint8_t bits)
+#ifdef CONFIG_IDE
+
+bool devide_wait(uint_fast8_t bits)
 {
-    uint8_t status;
+    uint_fast8_t status;
     timer_t timeout;
 
     timeout = set_timer_sec(20);
@@ -35,6 +37,8 @@ bool devide_wait(uint8_t bits)
            (status == 0xFF) || /* zeta-v2 PPIDE: status=0xFF indicates neither master nor slave drive present */
            (status == 0x87)){  /* n8vem-mark4:   status=0x87 indicates neither master nor slave drive present */
             kprintf("ide error, status=%x\n", status);
+            if (status & IDE_STATUS_ERROR)
+                kprintf("ide error, code=%x\n", devide_readb(ide_reg_error));
             return false;
         }
 
@@ -45,15 +49,15 @@ bool devide_wait(uint8_t bits)
     }
 }
 
-uint8_t devide_transfer_sector(void)
+uint_fast8_t devide_transfer_sector(void)
 {
-    uint8_t drive;
+    uint_fast8_t drive;
 #if defined(__SDCC_z80) || defined(__SDCC_z180) || defined(__SDCC_gbz80) || defined(__SDCC_r2k) || defined(__SDCC_r3k)
     uint8_t *p;
 #endif
 
 
-    drive = blk_op.blkdev->driver_data & DRIVE_NR_MASK;
+    drive = blk_op.blkdev->driver_data & IDE_DRIVE_NR_MASK;
 
     ide_select(drive);
 
@@ -99,9 +103,9 @@ fail:
 
 int devide_flush_cache(void)
 {
-    uint8_t drive;
+    uint_fast8_t drive;
 
-    drive = blk_op.blkdev->driver_data & DRIVE_NR_MASK;
+    drive = blk_op.blkdev->driver_data & IDE_DRIVE_NR_MASK;
 
     ide_select(drive);
 
@@ -134,7 +138,7 @@ fail:
 /* The innermost part of the transfer routines has to live in common memory */
 /* since it must be able to bank switch to the user memory bank.            */
 /****************************************************************************/
-#ifndef IDE_REG_INDIRECT
+#if !defined(IDE_REG_INDIRECT) && !defined(IDE_NONSTANDARD_XFER)
 
 #ifndef IDE_IS_MMIO
 
@@ -147,23 +151,25 @@ void devide_read_data(void) __naked
     __asm
             ld a, (_blk_op+BLKPARAM_IS_USER_OFFSET) ; blkparam.is_user
             ld hl, (_blk_op+BLKPARAM_ADDR_OFFSET)   ; blkparam.addr
-            ld b, #0                                ; setup count
-            ld c, #IDE_REG_DATA                     ; setup port number
+            ld bc, #IDE_REG_DATA                    ; setup port number
+                                                    ; and count
 #ifdef SWAPDEV
 	    cp #2
             jr nz, not_swapin
             ld a, (_blk_op+BLKPARAM_SWAP_PAGE)	    ; blkparam.swap_page
             call map_for_swap
-            jr swapin
+            jr doread
 not_swapin:
 #endif
             or a                                    ; test is_user
-            call nz, map_process_always             ; map user memory first if required
-swapin:
+            jr z, rd_kernel
+            call map_process_always  	            ; map user memory first if required
+            jr doread
+rd_kernel:
+            call map_buffers
+doread:
             inir                                    ; transfer first 256 bytes
             inir                                    ; transfer second 256 bytes
-            or a                                    ; test is_user
-            ret z                                   ; done if kernel memory transfer
             jp map_kernel                           ; else map kernel then return
     __endasm;
 }
@@ -173,25 +179,29 @@ void devide_write_data(void) __naked
     __asm
             ld a, (_blk_op+BLKPARAM_IS_USER_OFFSET) ; blkparam.is_user
             ld hl, (_blk_op+BLKPARAM_ADDR_OFFSET)   ; blkparam.addr
-            ld b, #0                                ; setup count
-            ld c, #IDE_REG_DATA                     ; setup port number
+            ld bc, #IDE_REG_DATA                    ; setup port number
+                                                    ; and count
 #ifdef SWAPDEV
 	    cp #2
             jr nz, not_swapout
             ld a, (_blk_op+BLKPARAM_SWAP_PAGE)	    ; blkparam.swap_page
             call map_for_swap
-            jr swapout
+            jr dowrite
 not_swapout:
 #endif
             or a                                    ; test is_user
-            call nz, map_process_always             ; else map user memory first if required
-swapout:
+            jr z, wr_kernel
+            call map_process_always                 ; else map user memory first if required
+            jr dowrite
+wr_kernel:
+            call map_buffers
+dowrite:
             otir                                    ; transfer first 256 bytes
             otir                                    ; transfer second 256 bytes
-            or a                                    ; test is_user
-            ret z                                   ; done if kernel memory transfer
             jp map_kernel                           ; else map kernel then return
     __endasm;
 }
 #endif
 #endif
+
+#endif /* CONFIG_IDE */

@@ -7,12 +7,16 @@
 
 	.import		__CODE_SIZE__, __RODATA_SIZE__
 	.import		__DATA_SIZE__, __BSS_SIZE__
+	.import		__STARTUP_SIZE__
 	.import		_exit
 	.export		_environ
 	.export		initmainargs
+	.export		__syscall_hook
 	.import		_main
 	.import		popax, pushax
 	.import		___stdio_init_vars
+	.import		decsp8, incsp8, decsp2, incsp2
+	.import		jmpvec
 
 	.export __STARTUP__ : absolute = 1;
 
@@ -20,19 +24,21 @@
 
 .segment "STARTUP"
 
-	jmp	start
-
-	.byte	'F'
-	.byte	'Z'
-	.byte	'X'
-	.byte	'1'
-	.byte	$20
-	.word	0
-	.word	__CODE_SIZE__ + __RODATA_SIZE__
+__syscall_hook:				; Stubs overlay this
+head:
+	.word 	$80A8
+	.byte	3			; 6502 family
+	.byte	0			; 6502 (we don't yet use 65C02 ops)
+	.byte	>head			; Load address page
+	.byte	0			; No hint bits
+	.word	__CODE_SIZE__ + __RODATA_SIZE__ + __STARTUP_SIZE__
 	.word	__DATA_SIZE__
 	.word	__BSS_SIZE__
-	.word	0
-	.word   0	; padding
+	.byte 	<start			; Offset from load page as entry
+	.byte	0			; No size hint
+	.byte	0			; No stack hint
+	.byte	0			; TODO - ZP size
+
 	.word	__sighandler		; IRQ path signal handling helper
 
 ;
@@ -44,23 +50,39 @@
 ;	I think therefore that providing we dec sp+1 we are always ok and
 ;	will be somewhere between 0 and 255 bytes of valid
 ;
+;	We save only the minimal scratch variables. The logic here is that
+;	this routine will not touch the 'register' variables in ZP, but
+;	any C function it calls will treat them as callee save so will do
+;	any needed save/restore for us. So we need to save ptr1-4, tmp1-4
+;	and jmpvec
 ;
 __sighandler:
-	jsr	stash_zp	; saves sp etc
 	dec	sp+1		; ensure we are safe C stack wise
+	lda	jmpvec+1
+	ldx	jmpvec+2
+	jsr 	pushax
+	jsr	decsp8
+	jsr	decsp8
+	jsr	decsp2
+	jsr	stash_zp	; saves sp etc
 	pla
-	sta	ptr1		; ZP was swapped
+	sta	jmpvec+1	; ZP was swapped (as was jmpvec)
 	pla
-	sta	ptr1+1		; ptr1 is now the function
+	sta	jmpvec+2	; Patch jmpvec
 	pla
-	ldx	#0
-	jsr	pushax		; signal(int sig)
-	jsr	jptr1		; no jsr (x) so fake it
-	jsr	stash_zp	; recovers sp
+
+	ldx	#0		; signal(sig)
+	jsr	jmpvec		; no jsr (x) so fake it
+	jsr	stash_zp	; recovers everything
+	jsr	incsp2
+	jsr	incsp8
+	jsr	incsp8
+	jsr	popax
+	stx	jmpvec+2
+	sta	jmpvec+1
+	inc	sp+1		; back to old stack
 initmainargs:			; Hardcoded compiler dumbness
 	rts			; will return via the kernel stub
-				; to user space
-jptr1:	jmp	(ptr1)
 ;
 ;
 ;	On entry sp/sp+1 have been set up by the kernel (this has to be
@@ -78,6 +100,8 @@ start:
 ; fine.
 ;
 ;
+;	FIXME: sort out some sort of constructor mechanism for this
+;
 	lda	sp
 	ldx	sp+1
 	clc
@@ -86,7 +110,7 @@ start:
 	inx
 l1:	sta	_environ
 	stx	_environ+1
-	jsr	popax		; Pull argv off the stack leaving argc
+;	jsr	popax		; Pull argv off the stack leaving argc
 	ldy	#2		; 2 bytes of args
         jsr     _main
 
@@ -96,29 +120,49 @@ l1:	sta	_environ
 				; for a fastcall return to nowhere.
 
 ;
-;	The following is taken from the debugger example as referenced in
-;	the compiler documentation. We swap a stashed ZP in our commondata
-;	with an IRQ handler one. The commondata is per process and we depend
-;	upon this to make it all work
-;
-; Swap the C temporaries
+; Swap the C temporaries - smaller than separate save/loaders
 ;
 stash_zp:
-        ldy     #zpsavespace-1
-Swap1:  ldx     CTemp,y
-        lda     <sp,y
-        sta     CTemp,y
-        txa
-        sta     sp,y
-        dey
-        bpl     Swap1
-        rts
+	ldy	#0
+stash_loop:
+	lda	(sp),y		; swap stack offset
+	pha
+	ldx	sp+2,y		; and ZP variable
+	txa
+	sta	(sp),y
+	pla
+	tax
+	stx	sp+2,y
+	iny
+	cpy	#zpsavespace - 2	; 18 bytes
+	bne	stash_loop
+	rts
+
+
+;
+;	Ensure this version is found before the broken one in cc65 runtime
+;	whichh won't work on 65C816
+
+;
+; Ullrich von Bassewitz, 06.08.1998
+;
+; CC65 runtime: call function via pointer in ax
+; Reworked Alan Cox 2017 to handle cases where ZP != 0
+;
+
+        .export         callax
+	.import		jmpvec
+
+	.macpack	generic
+	.macpack	cpu
+
+callax:
+	sta     jmpvec+1
+        stx     jmpvec+2
+        jmp     (jmpvec+1)         ; jump there
+
 
 
 	.bss
 _environ:	.res	2
 oldsp:		.res	2
-CTemp:
-		.res    2               ; sp
-		.res    2               ; sreg
-		.res    (zpsavespace-4) ; Other stuff

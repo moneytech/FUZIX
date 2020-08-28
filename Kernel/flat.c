@@ -15,9 +15,6 @@
  *
  *	Set:
  *	CONFIG_FLAT
- *	MAX_POOLS	maximum number of discontiguous memory pools in the
- *			machine
- *	MAX_BLOCKS	maximum blocks per user
  *
  *	TODO:
  *	Reference counting (for sticky binaries, vfork, fork emulation)
@@ -25,6 +22,8 @@
  *	addresses with many users we need to keep the memory available but free
  *	the spare for the next copy when it is copied into the real range).
  *
+ *	For speed we chunk in 512 byte blocks and use 512 byte wide fast
+ *	copier/exchange calls.
  */
 
 #include <kernel.h>
@@ -33,7 +32,9 @@
 
 #ifdef CONFIG_FLAT
 
-#define MAX_BLOCKS	15	/* Packs to a power of two */
+#undef DEBUG
+
+#define MAX_BLOCKS	14	/* Packs to a power of two */
 
 struct memblk {
 	void *start;
@@ -42,23 +43,26 @@ struct memblk {
 
 struct mem {
 	int users;
-	ptptr last;
+	int last;
 	struct memblk memblk[MAX_BLOCKS];
 };
 
-/* Eventually abstract page/page2 for this */
-static struct mem *mem[PTABSIZE];		/* The map we use */
+static struct mem *mem[PTABSIZE];	/* The map we use */
 static struct mem *store[PTABSIZE];	/* Where our memory currently lives */
 static struct mem memblock[PTABSIZE];
+
+extern struct u_data *udata_shadow;
 
 static void mem_free(struct mem *m)
 {
 	struct memblk *p = &m->memblk[0];
 	int i;
+	if (m->users == 0)
+		panic("mref");
 	m->users--;
 	if (m->users == 0) {
 		for (i = 0; i < MAX_BLOCKS; i++) {
-			kfree(p->start);
+			kfree_s(p->start, p->end - p->start);
 			p->start = NULL;
 			p++;
 		}
@@ -72,34 +76,39 @@ static struct mem *mem_alloc(void)
 	for (i = 0; i < PTABSIZE; i++) {
 		if (p->users == 0) {
 			p->users++;
-			p->last = NULL;
+			p->last = -1;
 			return p;
 		}
+		p++;
 	}
 	panic(PANIC_MLEAK);
 }
 
-static void *kdup(void *p, void *e)
+static void *kdup(void *p, void *e, uint8_t owner)
 {
-	void *n = kmalloc(e - p);
-	if (n)
-		memcpy(n, p, e - p);
+	void *n = kmalloc(e - p, owner);
+	if (n) {
+                copy_blocks(n, p, (e - p) >> 9);
+	}
 	return n;
 }
 
-static struct mem *mem_clone(struct mem *m)
+static struct mem *mem_clone(struct mem *m, uint8_t owner)
 {
 	struct mem *n = mem_alloc();
 	struct memblk *p = &m->memblk[0];
-	struct memblk *t = &m->memblk[0];
+	struct memblk *t = &n->memblk[0];
 	int i;
+	/* FIXME: need a per block 'RO' flag for non-copied blocks */
 	for (i = 0; i < MAX_BLOCKS; i++) {
-		t->start = kdup(p->start, p->end);
-		if (t->start == NULL) {
-			mem_free(n);
-			return NULL;
+		if (p->start) {
+			t->start = kdup(p->start, p->end, owner);
+			if (t->start == NULL) {
+				mem_free(n);
+				return NULL;
+			}
+			t->end = t->start + (p->end - p->start);
 		}
-		t->end = t->start + (p->end - p->start);
 		t++;
 		p++;
 	}
@@ -107,33 +116,35 @@ static struct mem *mem_clone(struct mem *m)
 	return n;
 }
 
-/*
- *	We make an assumption here: The user process is not guaranteed that
- *	two allocations are adjacent, therefore we don't allow a copy across
- *	what happens to be a join of two banks. We could fix this but it's not
- *	clear it would be wise!
- */
-usize_t valaddr(const char *pp, usize_t l)
+/* May need to switch owners on objects when we do swap etc */
+static void mem_switch(struct mem *a, struct mem *b)
 {
-	const void *p = pp;
-	const void *e = p + l;
-	unsigned int proc = udata.u_page;
-	int n = 0;
-	struct memblk *m = &mem[proc]->memblk[0];
+	struct memblk *t1 = &a->memblk[0];
+	struct memblk *t2 = &b->memblk[0];
+	unsigned int i;
 
-	while (n < MAX_BLOCKS) {
-		/* Found the right block ? */
-		if (m->start && m->start >= p && m->end < p) {
-			/* Check the actual space */
-			if (e >= m->end)
-				e = m->end;
-			/* Return the size we can copy */
-			return e - m->start;
-		}
-		m++;
-		n++;
+	for (i = 0; i < MAX_BLOCKS; i++) {
+		if (t1->start)
+			swap_blocks(t1->start, t2->start,
+				    (t1->end - t1->start) >> 9);
+		t1++;
+		t2++;
 	}
-	return 0;
+}
+
+static void mem_copy(struct mem *to, struct mem *from)
+{
+	struct memblk *t1 = &from->memblk[0];
+	struct memblk *t2 = &to->memblk[0];
+	unsigned int i;
+
+	for (i = 0; i < MAX_BLOCKS; i++) {
+		if (t1->start)
+			copy_blocks(t2->start, t1->start,
+				(t1->end - t1->start) >> 9);
+		t1++;
+		t2++;
+	}
 }
 
 /* Called on a fork and similar
@@ -143,6 +154,7 @@ usize_t valaddr(const char *pp, usize_t l)
    
    p is the process we are going to create maps for, udata.u_ptab is our
    own process. init is a special case!
+   
 */
 
 int pagemap_alloc(ptptr p)
@@ -150,23 +162,45 @@ int pagemap_alloc(ptptr p)
 	unsigned int proc = udata.u_page;
 	unsigned int nproc = p - ptab;
 
+#ifdef DEBUG
+	kprintf("%d: pagemap_alloc %p\n", proc, p);
+#endif
 	p->p_page = nproc;
+	if (platform_udata_set(p))
+		return ENOMEM;
 	/* Init is special */
 	if (p->p_pid == 1) {
+		struct memblk *mb;
+		udata_shadow = p->p_udata;
 		store[nproc] = mem_alloc();
-		store[nproc]->last = p;
 		mem[nproc] = store[nproc];
+		mem[nproc]->last = 0;
+		mb = &mem[nproc]->memblk[0];
+		/* Must be a multiple of 512 */
+		mb->start = kmalloc(8192, 0xFD	/* Dummy owner */);
+		mb->end = mb->start + 8192;
+		if (mb->start == 0)
+			panic("alloc");
+#ifdef DEBUG
+		kprintf("init at %p\n", mb->start);
+#endif
 		return 0;
 	}
-	/* Allocate memory for the old process as a copy of the new as the
-	   new will run first. We know that mem[proc] = store[proc] as proc
-	   is running the fork() */
-	store[proc] = mem_clone(mem[proc]);
-	if (store[proc] == NULL)
+	/* Allocate memory for the new process. The old will run first
+	   We know that mem[proc] = store[proc] as proc is running the fork() */
+#ifdef DEBUG
+	kprintf("%d: Cloning %d as %d\n", proc, proc, nproc);
+#endif
+	store[nproc] = mem_clone(mem[proc], nproc);
+	if (store[nproc] == NULL)
 		return ENOMEM;
 	mem[nproc] = mem[proc];
 	/* Last for our child is us */
-	store[nproc]->last = udata.u_ptab;
+#ifdef DEBUG
+	kprintf("%d: pa:store %p mem %p\n", proc, store[nproc],
+		mem[nproc]);
+#endif
+	mem[nproc]->last = proc;
 	return 0;
 }
 
@@ -181,26 +215,61 @@ int pagemap_alloc(ptptr p)
  *		- set our mem = store
  *		- set the last users store to be our old "mem"
  */
-void pagemap_switch(ptptr p)
+void pagemap_switch(ptptr p, int death)
 {
-	unsigned int proc = udata.u_page;
+	unsigned int proc = p->p_page;
 	int lproc;
 
+#ifdef DEBUG
+	kprintf("%d: ps:store %p mem %p\n", proc, store[proc], mem[proc]);
+#endif
 	/* We have the right map (unique or we ran the forked copy last) */
-	if (store[proc] == mem[proc])
+	if (store[proc] == mem[proc]) {
+#ifdef DEBUG
+		kprintf("Slot %d was mapped already.\n", proc);
+#endif
 		return;
+	}
 	/* Who had our memory last ? */
-	lproc = mem[proc]->last - ptab;
+	lproc = mem[proc]->last;
+#ifdef DEBUG
+	kprintf("%d: Slot %d last had our memory.\n", proc, lproc);
+	kprintf("%d: ps:store lp is %p mem %p\n", proc, store[lproc],
+		mem[lproc]);
+#endif
 	/* Give them our store */
 	store[lproc] = store[proc];
 	/* Take over the correctly mapped copy */
 	store[proc] = mem[proc];
 	/* Exchange the actual data */
-	/* FIXME: mem_switch(proc); */
+	if (death)
+		mem_copy(store[proc], store[lproc]);
+	else
+		mem_switch(store[proc], store[lproc]);
 	/* Admit to owning it */
-	mem[proc]->last = p;
+	mem[lproc]->last = proc;
+#ifdef DEBUG
+	kprintf("%d:Swapped over (now owned by %d not %d).\n", proc, proc,
+		lproc);
+	kprintf("%d:pse:store %p mem %p\n", proc, store[proc], mem[proc]);
+	kprintf("%d:pse:store lp is %p mem %p\n", proc, store[lproc],
+		mem[lproc]);
+	kprintf("%d:lp->next %d p->next %d\n", proc, mem[lproc]->last,
+		mem[proc]->last);
+#endif
 }
 
+static int pagemap_sharer(struct mem *ms)
+{
+	struct mem **m = mem;
+	int i;
+	for (i = 0; i < PTABSIZE; i++) {
+		if (*m == ms && store[i] != ms)
+			return i;
+		m++;
+	}
+	panic("share");
+}
 
 /* Called on exit */
 
@@ -211,45 +280,86 @@ void pagemap_free(ptptr p)
 
 	m = mem[proc];
 	/*
-	 *	Not a saved copy: easy
+	 *      Not a saved copy: easy
 	 */
-	if (store[proc] == mem[proc]) {
+	if (m == store[proc]) {
+		/* We own the live space but we can't free up the live space
+		   if it has another user */
+		if (m->users > 1) {
+			int n = pagemap_sharer(m);
+#ifdef DEBUG
+			kprintf
+			    ("%d: pagemap_free: busy non live - giving away to %d.\n",
+			     proc, n);
+#endif
+
+			pagemap_switch(&ptab[n], 1);
+			/* We gave our copy away, so free the store copy
+			   we just got donated */
+			mem_free(store[proc]);
+		}
+#ifdef DEBUG
+		kprintf("%d: pagemap_free: own live copy.\n", proc);
+#endif
+		/* Drop the reference count on the mem */
 		mem_free(m);
 		mem[proc] = NULL;
 		store[proc] = NULL;
 		return;
 	}
-	/*
-	 *	Give the live mapping to the previous user
+	/*      Our copy is not the live copy. This cannot normally occur.
+	 *      If we hit the case we can just flush it out.
 	 */
-	if (m->users > 1)
-		pagemap_switch(m->last);
-	mem_free(store[proc]);
+#ifdef DEBUG
+	kprintf("%d:pagemap_free:freeing our copy.\n", proc);
+#endif
+	mem_free(m);
 	store[proc] = NULL;
 	mem[proc] = NULL;
 }
 
-/* Called on execve */
-int pagemap_realloc(usize_t size)
+/* Called on execve: we should ideally work out whether freeing the
+   old map would allow us to make the new allocation but in practice we almost
+   always fork/exec so it's not that important.
+
+   TODO: support multiple blocks and allocate code/data separately allowing
+   for the alignment. We should probably trim the alignment to 64 bytes as
+   well
+
+   Supporting re-entrant binaries will need the binaries to have the data
+   aligned so maybe force it in the link ? */
+int pagemap_realloc(struct exec *hdr, usize_t size)
 {
 	unsigned int proc = udata.u_page;
 	struct memblk *mb;
-	
-	pagemap_free(udata.u_ptab);
-	
-	store[proc] = mem[proc] = mem_alloc();
-	mb = &mem[proc]->memblk[0];
+	struct mem *m;
 
-	mb->start = kmalloc(size);
+
+	m = mem_alloc();
+
+#ifdef DEBUG
+	kprintf("%d:pr:store %p mem %p\n", proc, store[proc], mem[proc]);
+#endif
+
+	mb = &m->memblk[0];
+
+	/* Snap to a block boundary for a fast memcpy/swap */
+	size = (size + 511) & ~511;
+
+	mb->start = kmalloc(size, proc);
 	mb->end = mb->start + size;
+
 	if (mb->start == NULL)
 		return ENOMEM;
+	/* Free the old map */
+	pagemap_free(udata.u_ptab);
+	store[proc] = mem[proc] = m;
 	return 0;
 }
 
 unsigned long pagemap_mem_used(void)
 {
-	return kmemused();
+	return kmemused() >> 10;	/* In kBytes */
 }
 
 /* Extra helper for exec32 */
@@ -257,31 +367,8 @@ unsigned long pagemap_mem_used(void)
 uaddr_t pagemap_base(void)
 {
 	unsigned int proc = udata.u_page;
-	return mem[proc]->memblk[0].start;
+	return (uaddr_t)mem[proc]->memblk[0].start;
 }
-
-/* Uget/Uput 32bit */
-
-uint32_t ugetl(void *uaddr, int *err)
-{
-	if (!valaddr(uaddr, 4)) {
-		if (err)
-			*err = -1;
-		return -1;
-	}
-	if (err)
-		*err = 0;
-	return *(uint32_t *)uaddr;
-
-}
-
-int uputl(uint32_t val, void *uaddr)
-{
-	if (!valaddr(uaddr, 4))
-		return -1;
-	return *(uint32_t *)uaddr;
-}
-
 
 /* The extra syscalls for the pool allocator */
 
@@ -302,13 +389,13 @@ arg_t _memalloc(void)
 	/* Map 0 is the image, the user doesn't get to play with that one */
 	for (i = 1; i < MAX_BLOCKS; i++) {
 		if (m->start == NULL) {
-			m->start = kzalloc(size);
+			m->start = kmalloc(size, proc);
 			if (m->start == NULL) {
 				udata.u_error = ENOMEM;
 				return -1;
 			}
 			m->end = m->start + size;
-			return (arg_t)m->start;
+			return (arg_t) m->start;
 		}
 		m++;
 	}
@@ -334,7 +421,7 @@ arg_t _memfree(void)
 
 	for (i = 1; i < MAX_BLOCKS; i++) {
 		if (m->start == base) {
-			kfree(base);
+			kfree_s(m->start, m->end - m->start);
 			m->start = NULL;
 			return 0;
 		}
@@ -345,5 +432,40 @@ arg_t _memfree(void)
 }
 
 #undef size
+
+/*
+ *	We make an assumption here: The user process is not guaranteed that
+ *	two allocations are adjacent, therefore we don't allow a copy across
+ *	what happens to be a join of two banks. We could fix this but it's not
+ *	clear it would be wise!
+ *
+ *	FIXME: need to fix this due to code/data alignment ?
+ */
+usize_t valaddr(const uint8_t *pp, usize_t l)
+{
+	const void *p = pp;
+	const void *e = p + l;
+	unsigned int proc = udata.u_page;
+	int n = 0;
+	struct memblk *m = &mem[proc]->memblk[0];
+
+	while (n < MAX_BLOCKS) {
+		/* Found the right block ? */
+		if (m->start && p >= m->start && p < m->end) {
+			/* Check the actual space */
+			if (e >= m->end)
+				e = m->end;
+			/* Fault error ? */
+			if (e == p)
+				break;
+			/* Return the size we can copy */
+			return e - p;
+		}
+		m++;
+		n++;
+	}
+	udata.u_error = EFAULT;
+	return 0;
+}
 
 #endif

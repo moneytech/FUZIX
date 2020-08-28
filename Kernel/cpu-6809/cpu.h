@@ -1,33 +1,14 @@
-typedef unsigned long uint32_t;
-typedef signed long int32_t;
-typedef unsigned short uint16_t;
-typedef signed short int16_t;
-typedef unsigned char uint8_t;
-typedef signed char int8_t;
-typedef unsigned int size_t;
-typedef signed int ssize_t;
-
-typedef uint8_t irqflags_t;
-
-typedef int16_t arg_t;
-typedef uint16_t uarg_t;		/* Holds arguments */
-typedef uint16_t usize_t;		/* Largest value passed by userspace */
-typedef int16_t susize_t;
-typedef uint16_t uaddr_t;		/* A user address must fit this */
-typedef uint16_t uptr_t;		/* User pointer equivalent */
-
 #define uputp  uputw			/* Copy user pointer type */
 #define ugetp  ugetw			/* between user and kernel */
 #define uputi  uputw			/* Copy user int type */
 #define ugeti  ugetw			/* between user and kernel */
 
-#define EMAGIC    0x7E    /* Header of executable  (JMP) */
-#define EMAGIC_2  0x20    /* BRA */
 /* Allow a minimum of 512 bytes gap between stack and top of allocations */
 #define brk_limit() (udata.u_syscall_sp - 512)
 
 extern void *memcpy(void *, const void *, size_t);
 extern void *memset(void *, int, size_t);
+extern int strcmp(const char *, const char *);
 extern size_t strlen(const char *);
 extern uint16_t swab(uint16_t);
 
@@ -68,3 +49,8 @@ typedef union {            /* this structure is endian dependent */
 #define gcc_miscompile_workaround()	__asm("":::"memory")
 
 #define BIG_ENDIAN
+
+#define __packed		__attribute__((packed))
+#define barrier()		asm volatile("":::"memory")
+
+#define __fastcall

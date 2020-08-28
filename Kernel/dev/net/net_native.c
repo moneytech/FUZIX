@@ -4,6 +4,13 @@
 #include <net_native.h>
 #include <printf.h>
 
+/*
+ *	TODO: support using a malloc pool of out of bank (or flat space)
+ *	memory buffers for networking not just file buffers. That way
+ *	it's much nicer on big boxes.
+ */
+#ifdef CONFIG_NET_NATIVE
+
 /* This holds the additional kernel context for the sockets */
 static struct sockdata sockdata[NSOCKET];
 /* This is the inode of the backing file object */
@@ -29,10 +36,10 @@ static struct netevent ne;
 
 int netdev_write(uint8_t flags)
 {
-	used(flags);
-	struct socket *s;
-	struct sockdata *sd;
+	regptr struct socket *s;
+	regptr struct sockdata *sd;
 
+	used(flags);
 	/* Grab a message from the service daemon */
 	if (net_ino == NULL || udata.u_count != sizeof(ne) || 
 		uget(udata.u_base, &ne, sizeof(ne)) == -1 ||
@@ -61,7 +68,8 @@ int netdev_write(uint8_t flags)
 		/* Asynchronous state changing event */
 	case NE_EVENT:
 		s->s_state = ne.data;
-		sd->err = ne.ret;
+		if (ne.ret)
+			s->s_error = ne.ret;
 		wakeup_all(s);
 		break;
 		/* Change an address */
@@ -83,11 +91,24 @@ int netdev_write(uint8_t flags)
 		s->s_iflag |= SI_DATA;
 		wakeup(&s->s_iflag);
 		break;
+		/* Remote reset */
+	case NE_RESET:
+		s->s_iflag |= SI_SHUTW;
+		s->s_state = SS_CLOSED;
 		/* Remote closed connection */
 	case NE_SHUTR:
 		s->s_iflag |= SI_SHUTR;
-		sd->err = ne.ret;
+		if (ne.ret)
+			s->s_error = ne.ret;
 		wakeup_all(s);
+		break;
+	case NE_UNHOOK:
+		if (s->s_state == SS_DEAD){
+			sd->event = 0;
+			sock_closed(s);
+		}
+		else
+			kputs("bad unhook (in use)\n");
 		break;
 	default:
 		kprintf("netbad %d\n", ne.event);
@@ -184,15 +205,17 @@ int netdev_ioctl(uarg_t request, char *data)
  */
 int netdev_close(uint8_t minor)
 {
-	used( minor );
-	struct socket *s = sockets;
+	regptr struct socket *s = sockets;
+	used(minor);
 	if (net_ino) {
 		i_deref(net_ino);
 		net_ino = NULL;
 		while (s < sockets + NSOCKET) {
 			if (s->s_state != SS_UNUSED) {
+				struct sockdata *sd = s->s_priv;
 				s->s_state = SS_CLOSED;
 				s->s_iflag |= SI_SHUTR|SI_SHUTW;
+				s->s_error = ENETDOWN;
 				wakeup_all(s);
 			}
 			s++;
@@ -217,9 +240,9 @@ static int netn_synchronous_event(struct socket *s, uint8_t state)
 	selwake_dev(4, 65, SELECT_IN);
 
 	do {
-	    if( s->s_state == SS_CLOSED )
+	    if( s->s_state == SS_CLOSED || s->s_state == SS_DEAD)
 		return -1;
-	    psleep(s);
+	    psleep_nosig(s);
 	} while (sd->event & NEVW_STATE);
 
 	udata.u_error = sd->ret;
@@ -319,12 +342,12 @@ static uint16_t netn_putbuf(struct socket *s)
 	udata.u_offset = s->s_num * SOCKBUFOFF + RXBUFOFF + sd->tbuf * TXPKTSIZ;
 	/* FIXME: check writei returns and readi returns properly */
 	writei(net_ino, 0);
-	sd->tlen[sd->tnext++] = udata.u_count;
+	sd->tlen[sd->tnext++] = udata.u_done;
 	if (sd->tnext == NSOCKBUF)
 		sd->tnext = 0;
 	/* Tell the network stack there is another buffer to consume */
 	netn_asynchronous_event(s, NEV_WRITE);
-	return udata.u_count;
+	return udata.u_done;
 }
 
 /*
@@ -351,7 +374,7 @@ static uint16_t netn_getbuf(struct socket *s)
 	if (++sd->rbuf == NSOCKBUF)
 		sd->rbuf = 0;
 	netn_asynchronous_event(s, NEV_READ);
-	return udata.u_count;
+	return udata.u_done;
 }
 
 /*
@@ -434,7 +457,6 @@ static uint16_t netn_copyout(struct socket *s)
  */
 int net_init(struct socket *s)
 {
-    int x;
 	struct sockdata *sd = sockdata + s->s_num;
 	if (!net_ino) {
 		udata.u_error = ENETDOWN;
@@ -442,7 +464,6 @@ int net_init(struct socket *s)
 	}
 	s->s_priv = sd;
 	sd->socket = s;
-	sd->err = 0;
 	sd->event = 0;
 	sd->rbuf = sd->rnext = 0;
 	sd->tbuf = sd->tnext = 0;
@@ -487,28 +508,39 @@ int net_connect(struct socket *s)
  *	implementation has longer lived resources (eg a TCP port moving
  *	into TIME_WAIT) then the socket and internal resources must be
  *	disconnected from one another.
+ *
+ *	Fuzix close() methods are not permitted to block.
  */
 void net_close(struct socket *s)
 {
+	struct sockdata *sd = s->s_priv;
 	/* Caution here - the native tcp socket will hang around longer */
-	netn_synchronous_event(s, SS_CLOSED);
+	sd->newstate = SS_DEAD;
+	netn_asynchronous_event(s, NEV_STATE|NEVW_STATE);
+	/* The stack will see the closed state and then we will
+	   progress to SS_DEAD. When the stack is finished with us it
+	   will send an UNHOOK message which will do the final resource
+	   clean up and allow the socket to be reused */
 }
 
 /*
  *	Read or recvfrom a socket. We don't yet handle message addresses
  *	sensibly and that needs fixing
  */
-arg_t net_read(struct socket *s, uint8_t flag)
+arg_t net_read(regptr struct socket *s, uint8_t flag)
 {
 	uint16_t n = 0;
 	struct sockdata *sd = s->s_priv;
 
-	if (sd->err) {
-		udata.u_error = sd->err;
-		sd->err = 0;
-		return -1;
-	}
 	while (1) {
+		/* Partial I/O saves the error for the rext call but
+		   returns */
+		if (s->s_error) {
+			if (n == 0)
+				return sock_error(s);
+			else
+				return n;
+		}
 		/* FIXME: We should be forced into CLOSED state so is this
 		   check actually needed */
 	        if (net_ino == NULL) {
@@ -544,17 +576,14 @@ arg_t net_read(struct socket *s, uint8_t flag)
  *	Write or sendto a socket. We don't yet handle message addresses
  *	sensibly and that needs fixing
  */
-arg_t net_write(struct socket * s, uint8_t flag)
+arg_t net_write(regptr struct socket * s, uint8_t flag)
 {
 	uint16_t n = 0, t = 0;
 	uint16_t l = udata.u_count;
 	struct sockdata *sd = s->s_priv;
 
-	if (sd->err) {
-		udata.u_error = sd->err;
-		sd->err = 0;
+	if (sock_error(s))
 		return -1;
-	}
 
 	while (t < l) {
 		udata.u_count = l - t;
@@ -570,6 +599,12 @@ arg_t net_write(struct socket * s, uint8_t flag)
 		/* FIXME: buffer the error in this case */
 		if (n == 0xFFFFU)
 			return l ? (arg_t)l : -1;
+
+		if (s->s_error){
+			if (l == 0)
+				return sock_error(s);
+			return l;
+		}
 
 		t += n;
 
@@ -605,3 +640,5 @@ arg_t net_ioctl(uint8_t op, void *p)
 void netdev_init(void)
 {
 }
+
+#endif

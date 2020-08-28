@@ -378,13 +378,26 @@ SYM (__umodsi3):
 
 		.globl __hard_di,__hard_ei,__hard_irqrestore
 		.globl doexec
+		.globl flush_icache
+		.globl enable_icache
 		.globl get_usp, set_usp
 		.globl outstring,outstringhex,outcharhex,outa0hex
 		.globl bus_error,addr_error,illegal,divzero,chk,trapv,priv
-		.globl trace,unimpa,unimpf,misctrap,trap15,trap14,sysc_err
+		.globl trace,unimpa,unimpf,sysc_err
+		.globl trap0,trap1,trap2,trap3,trap4,trap5,trap6,trap7
+		.globl trap8,trap9,trap10,trap11,trap12,trap13,trap14,trap15
 		.globl spurious,unexpected,uninit
+		.globl cpu_type,probe_memory,cpu_has_trapvec,cpu_has_icache
 		.globl udata_shadow
 		.globl trap_via_signal
+		.globl dump_registers
+		.globl kernel_flag
+		.globl copy_blocks
+		.globl swap_blocks
+		.globl install_vectors
+		.globl vdso
+		.globl sys_cpu
+		.globl sys_cpu_feat
 
 .mri 1
 get_usp:	move.l	usp,a0
@@ -400,12 +413,18 @@ set_usp:	move.l 4(sp),a0
  */
 __hard_di:
 		move.w sr,d0
+		move.w d0,d1
 		and.w #$0700,d0
-		or.w #$0700,sr
+		and.w #$F8FF,d1
+		or.w #DI_MASK,d1
+		move.w d1,sr
 		rts
 
 __hard_ei:
-		and.w #$F8FF,sr
+		move.w sr,d0
+		and.w #$F8FF,d0
+		or.w #EI_MASK,d0
+		move.w d0,sr
 		rts
 
 __hard_irqrestore:
@@ -416,6 +435,36 @@ __hard_irqrestore:
 		rts
 
 ;
+;	'VDSO' (copied into the base of each executable)
+;
+vdso:		trap #12		; syscall entry
+		rts
+		; signal unwind
+		move.l 8(sp),sp		; blow away stack frame
+		movem.l (sp)+,a0/a1/d0/d1
+		move.w (sp)+,ccr
+		rts
+		; rest is spare for now
+
+
+;
+;	Flush the 68020 icache. Right now we probably only need to do this
+;	on a doexec(). Actually there due to the size of the transfer it's
+;	correctness only !
+;
+;	FIXME: do we need a syscall to let apps do cache flushes ?
+;
+enable_icache:
+flush_icache:
+		tst.b cpu_has_icache
+		beq noflush
+		; Flush the icache
+		move.w #$9,d0
+		movec d0,cacr
+noflush:
+		rts
+
+;
 ;	Put the supervisor stack back as if we had nothing on it (we just
 ;	longjmp'd out of the syscall path really). Then we push an exception
 ;	frame, clear the registers and rte. We need to rte as we want to
@@ -423,12 +472,24 @@ __hard_irqrestore:
 ;	is memory protection.
 ;
 doexec:
+		bsr flush_icache
+
 		move.l 4(sp),a1			; go address
 		lea.l 1024(a5),a7		; reset the supervisor stack
 
-		and.w #$F8FF,sr			; IRQ on
+
+		move.w sr,d0			; Set the IRQ mask
+		and.w #$D8FF,d0			; Supervisor off
+		or.w #EI_MASK,d0		; May be some masked even
+		; Don't put the status back yet - we will unmask in the rte
+		; as we clear the supervisor frame
+
+		tst.b cpu_has_trapvec
+		beq threeword
+		clr.w -(sp)			; push vector
+threeword:
 		move.l a1,-(sp)			; return address
-		clr.w -(sp)			; set up the status register
+		move.w d0,-(sp)			; set up the status register
 		move.l U_DATA__U_ISP(a5),a0
 		move.l a0,usp			; set the user stack
 		moveq #0,d0			; wipe the registers
@@ -448,31 +509,204 @@ doexec:
 		move.l d0,a6
 		rte		; hit user space (and will enable interrupts)
 
+install_vectors:
+		move.l #8,a0
+		move.w #253,d0
+		move.l #unexpected,d1
+		;
+		;	The 683xx devices use F0-FF for magic such as
+		;	hardware base addresses and control registers. Skip
+		;	this range.
+		;
+init_trap_loop:
+		cmp.w #$f0,a0
+		blt sandwich			; with mayo
+		cmp.w #$fc,a0
+		ble skipvec
+sandwich:
+		move.l d1,(a0)+
+skipvec:
+		dbra d0,init_trap_loop
+		;
+		; Now set the vectors we care about
+		;
+		move.w #8,a0
+		move.l #bus_error,(a0)+
+		move.l #addr_error,(a0)+
+		move.l #illegal,(a0)+
+		move.l #divzero,(a0)+
+		move.l #chk,(a0)+
+		move.l #trapv,(a0)+
+		move.l #priv,(a0)+
+		move.l #trace,(a0)+
+		move.l #unimpa,(a0)+	; A and F line traps
+		move.l #unimpf,(a0)+
+		move.w #$80,a0
+		move.l #trap0,(a0)+
+		move.l #trap1,(a0)+
+		move.l #trap2,(a0)+
+		move.l #trap3,(a0)+
+		move.l #trap4,(a0)+
+		move.l #trap5,(a0)+
+		move.l #trap6,(a0)+
+		move.l #trap7,(a0)+
+		move.l #trap8,(a0)+
+		move.l #trap9,(a0)+
+		move.l #trap10,(a0)+
+		move.l #trap11,(a0)+
+		move.l #trap12,(a0)+
+		move.l #trap13,(a0)+
+		move.l #trap14,(a0)+
+		move.l #trap15,(a0)
+		move.w #$0,a0
+		move.l #uninit,$3c(a0)
+		move.l #spurious,$60(a0)
+		rts
 
-bus_error:	move.w #SIGBUS,trap_id
-		bra sig_or_die
-addr_error:	move.w #SIGSEGV,trap_id
-		bra sig_or_die
-illegal:	move.w #SIGILL,trap_id
-		bra sig_or_die
-divzero:	move.w #SIGFPE,trap_id
-		bra sig_or_die
-chk:		move.w #SIGFPE,trap_id
-		bra sig_or_die
-trapv:		move.w #SIGFPE,trap_id
-		bra sig_or_die
-priv:		move.w #SIGFPE,trap_id
-		bra sig_or_die
-trace:		move.w #SIGTRAP,trap_id
-		bra sig_or_die
-unimpa:		move.w #SIGFPE,trap_id
-		bra sig_or_die
-unimpf:		move.w #SIGFPE,trap_id
-		bra sig_or_die
-misctrap:	move.w #SIGILL,trap_id
-		bra sig_or_die
-trap15:		move.w #SIGTRAP,trap_id			; by convention
-		bra sig_or_die
+;
+;	Interrupts assumed to be off for these trap tricks
+;
+
+;
+;	Override the bus error trap and check if a memory address faults
+;	(Returns 1 if it errors)
+;
+probe_memory:
+		move.l 4(sp),a0
+		move.l #probe_error,8
+		move.l a7,a1
+		moveq #0,d0
+		move.w (a0),d1
+probe_out:	move.l #bus_error,8
+		rts
+probe_error:
+		moveq #1,d0
+		move.l a1,a7
+		bra probe_out
+;
+;	Check the cpu type and return 0,10,etc.
+;
+;	FIXME: doesn't tell 68020 from 68030
+;	One way we could do that would be to issue a CALLM with a bogus
+;	module descriptor and see if we get illegal (68030) or a format
+;	exception. We can fix that when we actually need to support anything
+;	bigger than a 68010 !
+;
+cpu_type:
+		move.l #cpu_ill_error,16
+		move.l a7,a1
+		moveq #0,d0
+		movec vbr,d1		; faults on a 68000
+		moveq #10,d0
+		movec cacr,d1		; faults on a 68000 and 010
+		move.b #1,cpu_has_icache
+		moveq #20,d0
+		movec itt0,d1		; faults on 68020/30
+		moveq #40,d0
+		movec pcr,d1		; faults on all but 68060
+		moveq #60,d0
+cpu_type_exit:
+		move.l #illegal,16
+		move.b d0,cpu_has_trapvec
+		rts
+;
+;	We found the faulting instruction for this CPU type so bail
+;
+cpu_ill_error:
+		move.l a1,a7
+		bra cpu_type_exit
+
+bus_error:	move.w sr,-(sp)
+		move.w #2,-(sp)
+		bra synchronous_exception
+addr_error:	move.w sr,-(sp)
+		move.w #3,-(sp)
+		bra synchronous_exception
+illegal:	move.w sr,-(sp)
+		move.w #4,-(sp)
+		bra synchronous_exception
+divzero:	move.w sr,-(sp)
+		move.w #5,-(sp)
+		bra synchronous_exception
+chk:		move.w sr,-(sp)
+		move.w #6,-(sp)
+		bra synchronous_exception
+trapv:		move.w sr,-(sp)
+		move.w #7,-(sp)
+		bra synchronous_exception
+priv:		move.w sr,-(sp)
+		move.w #8,-(sp)
+		bra synchronous_exception
+trace:		move.w sr,-(sp)
+		move.w #9,-(sp)
+		bra synchronous_exception
+unimpa:		move.w sr,-(sp)
+		move.w #10,-(sp)
+		bra synchronous_exception
+unimpf:		move.w sr,-(sp)
+		move.w #11,-(sp)
+		bra synchronous_exception
+trap0:		move.w sr,-(sp)
+		move.w #32,-(sp)
+		bra synchronous_exception
+trap1:		move.w sr,-(sp)
+		move.w #33,-(sp)
+		bra synchronous_exception
+trap2:		move.w sr,-(sp)
+		move.w #34,-(sp)
+		bra synchronous_exception
+trap3:		move.w sr,-(sp)
+		move.w #35,-(sp)
+		bra synchronous_exception
+trap4:		move.w sr,-(sp)
+		move.w #36,-(sp)
+		bra synchronous_exception
+trap5:		move.w sr,-(sp)
+		move.w #37,-(sp)
+		bra synchronous_exception
+trap6:		move.w sr,-(sp)
+		move.w #38,-(sp)
+		bra synchronous_exception
+trap7:		move.w sr,-(sp)
+		move.w #39,-(sp)
+		bra synchronous_exception
+trap8:		move.w sr,-(sp)
+		move.w #40,-(sp)
+		bra synchronous_exception
+trap9:		move.w sr,-(sp)
+		move.w #41,-(sp)
+		bra synchronous_exception
+trap10:		move.w sr,-(sp)
+		move.w #42,-(sp)
+		bra synchronous_exception
+trap11:		move.w sr,-(sp)
+		move.w #43,-(sp)
+		bra synchronous_exception
+trap13:		move.w sr,-(sp)
+		move.w #45,-(sp)
+		bra synchronous_exception
+trap14:		move.w sr,-(sp)
+		move.w #46,-(sp)
+		bra synchronous_exception
+trap15:		move.w sr,-(sp)
+		move.w #47,-(sp)
+
+;
+;	Above us is the exception frame and return address
+;	Add the registers to it
+;
+synchronous_exception:
+		movem.l a0-a6/d0-d7,-(sp)
+		move.l sp,-(sp)		; pointer to trap
+		move.l udata_shadow,a5
+		; Do the hard stuff in C
+		bsr exception
+		; This may not come back if the process dies or we panic
+		addq #4,sp
+		; Recover registers (may have changed)
+		movem.l (sp)+,a0-a6/d0-d7
+		addq #4,sp
+		rte
 
 ;
 ;		Save as little as we can
@@ -484,7 +718,8 @@ trap15:		move.w #SIGTRAP,trap_id			; by convention
 ;
 ;		fork is special see the fork code.
 ;
-trap14:		move.l a5,-(sp)		; must be first to match fork
+trap12:
+		move.l a5,-(sp)		; must be first to match fork
 		move.l udata_shadow,a5
 		move.b d0,U_DATA__U_CALLNO(a5)
 		move.b #1,U_DATA__U_INSYS(a5)
@@ -530,18 +765,17 @@ sysc_err:	moveq #-1,d0
 ;	stack above the trap frame.
 ;
 return_via_signal:
-		; Stack now is return frame,a5,a1,a0,d1,d0
-		movem.l a0-a1/d0-d1,-(sp)
-trap_via_signal:
-		lea.l 20(sp),a0			; Trap frame pointer
-		move.l a0,-(sp)
-		bsr signal_frame		; Make up the signal frame
-		add.w #20,sp			; Pop call frame
-		moveq #0,d0			; No leaks into handler
-		move.l d0,d1
-		move.l d0,a0
-		move.l d0,a1
-		move.l (sp)+,a5			; recover user A5
+		; Stack now is return frame,a5
+		move.l (sp)+,a5
+		move.w sr,-(sp)
+		move.w #0,-(sp)
+		movem.l a0-a6/d0-d7,-(sp)
+		move.l sp,-(sp)
+		move.l udata_shadow,a5
+		bsr exception
+		addq #4,sp
+		movem.l (sp)+,a0-a6/d0-d7
+		addq #4,sp
 		rte				; into modified handler
 
 spurious:	movem.l a0-a6/d0-d7,-(sp)
@@ -553,6 +787,9 @@ spurious:	movem.l a0-a6/d0-d7,-(sp)
 unexpected:	movem.l a0-a6/d0-d7,-(sp)
 		move.l #strunexpected,a0
 		bsr outstring
+		move.w 6(sp),d0
+		move.w d0,a0
+		bsr outa0hex
 unexpectedl:	bra unexpectedl
 
 uninit:		movem.l a0-a6/d0-d7,-(sp)
@@ -568,79 +805,25 @@ strunexpected:
 		asciz "unexpected trap\n"
 
 		.align 2
-;
-;	FIXME:
-;	Use the trap frame not flags to test this (exception from supervisor
-;	means bad). Also we need to work out the frame size and move it to
-;	the user stack with a signal to help debuggers.
-;
-;	On entry trap_id holds the signal number
-;
-sig_or_die:	
-		tst.b kernel_flag
-		beq sig_user
-		move.w trap_id,d0
-		bsr outcharhex
-		lea panic_sig,a0
-		bsr outstring
-		move.l 2(sp),a0
-		bsr outa0hex
-		move.w #15,d2
-stackout:
-		move.l (sp)+,a0
-		bsr outa0hex
-		lea crnl,a0
-		bsr outstring
-		dbra d2,stackout
-		move.l #panic_sig2,-(sp)
-		bsr panic			; won't return
-
-panic_sig:	ascii ": signal in kernel mode @"
-		byte 0
-crnl:
-		byte 13,10,0
-panic_sig2:	asciz "ksig"
-		.align 2
-
-sig_user:	movem.l a0-a1/a5/d0-d1,-(sp)
-		move.w trap_id,d0		; signal number
-		ext.l d0
-	        move.l udata_shadow,a5
-		; deliver the signal
-		move.l d0,-(sp)
-		move.l U_DATA__U_PTAB(a5),-(sp)
-		bsr ssig
-		addq #8,sp
-		bsr chksigs
-		tst.b d0
-		bne trap_via_signal
-		; No signal - just unwind and probably fault again
-		; in which case we'll probably loop faulting until pre-empted
-		; and killed by another process. Do a yield here to try
-		; and reduce any damage
-		bsr _sched_yield
-		movem.l (sp)+,a0-a1/a5/d0-d1
-		rte
 
 /*
  *	Block copy helper
  *
  *	We use d0 = number of blocks
- *	       d1 = constant 32 for speeding up the maths
  *	       a0 = source
  *	       a1 = destination
- *	       d2-d7/a2-a6 	- copying registers (44 bytes a go)
+ *	       d1-d7/a2-a6 	- copying registers (48 bytes a go)
  *
  */
 
 copy_blocks:
-		move.l 4(sp),a0
-		move.l 8(sp),a1
+		move.l 4(sp),a1
+		move.l 8(sp),a0
 		move.l 12(sp),d0
-
 /* asm entry point */
 copy_blocks_d0:
 		movem.l d2-d7/a2-a6,-(sp)
+		bra copy_blocks_loop
 copy_block512:
 		movem.l (a0)+,d1-d7/a2-a6
 		movem.l d1-d7/a2-a6,(a1)
@@ -653,7 +836,7 @@ copy_block512:
 		movem.l (a0)+,d1-d7/a2-a6
 		movem.l d1-d7/a2-a6,192(a1)
 		movem.l (a0)+,d1-d7/a2-a6
-		movem.l d1-d7/a2-a6,248(a1)
+		movem.l d1-d7/a2-a6,240(a1)
 		movem.l (a0)+,d1-d7/a2-a6
 		movem.l d1-d7/a2-a6,288(a1)
 		movem.l (a0)+,d1-d7/a2-a6
@@ -662,8 +845,10 @@ copy_block512:
 		movem.l d1-d7/a2-a6,384(a1)
 		movem.l (a0)+,d1-d7/a2-a6
 		movem.l d1-d7/a2-a6,432(a1)
-		movem.l (a0)+,d1-d4
-		movem.l d1-d4,480(a1)
+		movem.l (a0)+,d1-d7/a2
+		movem.l d1-d7/a2,480(a1)
+		add.w #512,a1
+copy_blocks_loop:
 		dbra d0,copy_block512
 		movem.l (sp)+,d2-d7/a2-a6
 		rts
@@ -674,21 +859,22 @@ clear_blocks:
 clear_blocks_d0:
 		movem.l d2-d7/a2-a6,-(sp)
 		moveq #0,d1
-		move.l d1,d2
-		move.l d1,d3
-		move.l d1,d4
-		move.l d1,d5
-		move.l d1,d6
-		move.l d1,d7
+		moveq #0,d2
+		moveq #0,d3
+		moveq #0,d4
+		moveq #0,d5
+		moveq #0,d6
+		moveq #0,d7
 		move.l d1,a1
 		move.l d1,a2
 		move.l d1,a3
 		move.l d1,a4
 		move.l d1,a5
 		move.l d1,a6
-clear512:
-		/* End of the 512 byte block */
+		bra clear_block_loop
+		/* End of the first 512 byte block */
 		lea 512(a0),a0
+clear512:
 		/* zero in 52 byte chunks */
 		movem.l d1-d7/a1-a6,-(a0)
 		movem.l d1-d7/a1-a6,-(a0)
@@ -701,10 +887,92 @@ clear512:
 		movem.l d1-d7/a1-a6,-(a0)
 		/* 9 * 52 + 44 */
 		movem.l d1-d7/a1-a4,-(a0)
-		/* Next block */
-		lea 512(a0),a0
+		/* Next block end (allowing for all the decrements)*/
+		lea 1024(a0),a0
+clear_block_loop:
 		dbra d0,clear512
 		movem.l (sp)+,d2-d7/a2-a6
+
+		rts
+
+swap_blocks:
+		move.l 4(sp),a0
+		move.l 8(sp),a1
+		move.l 12(sp),d0
+
+		; in 512's but we loop in 256's
+		add.w d0,d0
+
+		movem.l d2-d7/a2-a6,-(sp)
+		bra swap_blocks_loop
+swap256:
+		; We have 12 free registers so use them in blocks of 6
+		; and use post increment on read and negative offsets on
+		; write back in order to avoid extra maths ops
+
+		; Each sequence exchanges 24 bytes
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		/* 120 bytes done so far */
+
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		movem.l (a0)+,d1-d6
+		movem.l (a1)+,d7/a2-a6
+		movem.l d1-d6,-24(a1)
+		movem.l d7/a2-a6,-24(a0)
+
+		/* 240 bytes done, tidy up to 256 */
+
+		movem.l (a0)+,d2-d5
+		movem.l (a1)+,a2-a5
+		movem.l d2-d5,-16(a1)
+		movem.l a2-a5,-16(a0)
+
+swap_blocks_loop:
+		dbra d0,swap256
+		movem.l (sp)+,a2-a6/d2-d7
 		rts
 
 /*
@@ -749,8 +1017,86 @@ outcharhex:	move.w d0,-(sp)
 		bsr hexdigit
 		move.w (sp)+,d0
 		rts
-
+/*
+ *	General register dump logic
+ */
+dump_registers:
+		movem.l a0-a2/d0-d2,-(sp)
+		movem.l d0-d2,-(sp)
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l a1,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l a2,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l a3,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l a4,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l a5,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l a6,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l a7,a0
+		bsr outa0hex
+		move.b #10,d0
+		bsr outchar
+		movem.l (sp)+,a0-a2
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l a1,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l a2,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l d3,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l d4,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l d5,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l d6,a0
+		bsr outa0hex
+		move.b #' ',d0
+		bsr outchar
+		move.l d7,a0
+		bsr outa0hex
+		move.b #10,d0
+		bsr outchar
+		move.b #10,d0
+		bsr outchar
+		movem.l (sp)+,a0-a2/d0-d2
+		rts
 .area data
 kernel_flag:	byte 0
 udata_shadow:	long 0
 trap_id:	word 0
+cpu_has_trapvec:
+		byte 0
+cpu_has_icache:
+		byte 0
+sys_cpu:	byte 9		; 68000
+sys_cpu_feat:	byte 0		; 68000 base features (updated as we boot)

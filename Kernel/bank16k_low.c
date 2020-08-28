@@ -1,6 +1,7 @@
 #include <kernel.h>
 #include <kdata.h>
 #include <printf.h>
+#include <exec.h>
 
 /*
  *	This module manages a system with flexible 16K sized banks. It assumes
@@ -111,7 +112,7 @@ int pagemap_alloc(ptptr p)
 /*
  *	Reallocate the maps for a process
  */
-int pagemap_realloc(uint16_t size)
+int pagemap_realloc(struct exec *hdr, uint16_t size)
 {
 	int have = maps_needed(udata.u_top);
 	int want = maps_needed(size);
@@ -153,9 +154,21 @@ int pagemap_realloc(uint16_t size)
 	return 0;
 }
 
+int pagemap_prepare(struct exec *hdr)
+{
+	/* If it is relocatable load it at PROGLOAD */
+	if (hdr->a_base == 0)
+		hdr->a_base = PROGLOAD >> 8;
+	/* If it doesn't care about the size then the size is all the
+	   space we have */
+	if (hdr->a_size == 0)
+		hdr->a_size = (ramtop >> 8) - hdr->a_base;
+	return 0;
+}
+
 uint16_t pagemap_mem_used(void)
 {
-	return pfptr << 4;
+	return procmem - (pfptr << 4);
 }
 
 
@@ -174,7 +187,7 @@ int swapout(ptptr p)
 {
 	uint16_t page = p->p_page;
 	uint16_t blk;
-	uint16_t map;
+	int16_t map;
 	uint16_t base = SWAPBASE;
 	uint16_t size = (0x4000 - SWAPBASE) >> 9;
 	uint8_t *pt = (uint8_t *)&p->page;
@@ -187,7 +200,7 @@ int swapout(ptptr p)
 
 	/* Are we out of swap ? */
 	map = swapmap_alloc();
-	if (map == 0)
+	if (map == -1)
 		return ENOMEM;
 	blk = map * SWAP_SIZE;
 

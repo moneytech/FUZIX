@@ -1,30 +1,7 @@
-typedef unsigned long uint32_t;
-typedef signed long int32_t;
-typedef unsigned short uint16_t;
-typedef signed short int16_t;
-typedef unsigned char uint8_t;
-typedef signed char int8_t;
-typedef unsigned int size_t;
-typedef signed int ssize_t;
-
-typedef uint8_t irqflags_t;
-
-typedef int16_t arg_t;
-typedef uint16_t uarg_t;		/* Holds arguments */
-typedef uint16_t usize_t;		/* Largest value passed by userspace */
-typedef int16_t susize_t;
-typedef uint16_t uaddr_t;		/* A user address must fit this */
-typedef uint16_t uptr_t;		/* User pointer equivalent */
-
 #define uputp  uputw			/* Copy user pointer type */
 #define ugetp  ugetw			/* between user and kernel */
 #define uputi  uputw			/* Copy user int type */
 #define ugeti  ugetw			/* between user and kernel */
-
-/* FIXME: we actually want to use an a.out loader */
-
-#define EMAGIC    0x7E    /* Header of executable  (JMP) */
-#define EMAGIC_2  0x20    /* BRA */
 
 /* Allow a minimum of 512 bytes gap between stack and top of allocations */
 #define brk_limit() (udata.u_syscall_sp - 512)
@@ -76,3 +53,7 @@ typedef union {            /* this structure is endian dependent */
 
 #define BIG_ENDIAN
 #define PDP_ENDIAN
+
+#define barrier()		asm volatile("":::"memory")
+
+#define __fastcall

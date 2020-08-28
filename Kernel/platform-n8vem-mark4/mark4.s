@@ -20,7 +20,7 @@
 
         .include "kernel.def"
         .include "../cpu-z180/z180.def"
-        .include "../kernel.def"
+        .include "../kernel-z80.def"
 
 ; -----------------------------------------------------------------------------
 ; Buffers
@@ -81,7 +81,5 @@ inchar:
         rlca
         jr nc, inchar
         in0 a, (ASCI_RDR0)
-        ret
-
 platform_interrupt_all:
         ret

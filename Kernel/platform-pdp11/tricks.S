@@ -3,12 +3,11 @@
 	.text
 
 	.globl _switchin
-	.globl _switchout
+	.globl _platform_switchout
 	.globl _dofork
 
-_switchout:
+_platform_switchout:
 	bis 0340,0177776
-	jsr pc,_chksigs
 	clr -(sp)
 	mov r5,-(sp)
 	mov r4,-(sp)
@@ -22,7 +21,7 @@ _switchout:
 	jsr pc,_getproc
 	mov r0,-(sp)
 	jsr pc,_switchin
-	jmp _trap_monitor
+	jmp _platform_monitor
 
 /* Simple swap based to begin with */
 _switchin:
@@ -72,7 +71,7 @@ switchfail:
 	jsr pc,outr0hex
 	mov $badswitchmsg,r0
 	jsr pc,outstring		
-	jmp _trap_monitor
+	jmp _platform_monitor
 
 _dofork:
 	mov 2(sp),r0
@@ -92,9 +91,10 @@ _dofork:
 	add $14,sp
 	tst r0
 	bne forked_up
-	mov 2(sp),-(sp)
-	jsr pc,_newproc
-	add $2,sp
+	mov _udata,-(sp)
+	mov 4(sp),-(sp)
+	jsr pc,_makeproc
+	add $4,sp
 	clr r0
 	clr _runticks
 	rts pc

@@ -32,7 +32,7 @@ struct termios {
 #define BRKINT	0x0001
 #define ICRNL	0x0002	/* Supported */
 #define IGNBRK	0x0004
-#define IGNCR	0x0008
+#define IGNCR	0x0008  /* Supported */
 #define IGNPAR	0x0010
 #define INLCR	0x0020	/* Supported */
 #define INPCK	0x0040
@@ -42,6 +42,8 @@ struct termios {
 #define IXOFF	0x0400
 #define PARMRK	0x0800
 #define IXON	0x1000
+
+#define _ISYS	(IGNCR|ICRNL|INLCR|ISTRIP)	/* Flags supported by core */
 
 #define OPOST	0x0001	/* Supported */
 #define OLCUC	0x0002
@@ -71,6 +73,8 @@ struct termios {
 #define FFDLY	0x2000
 #define FF0	0x0000
 #define FF1	0x2000
+
+#define _OSYS	(OPOST|ONLCR|OCRNL)
 
 #define B0	0x0000
 #define B50	0x0001
@@ -103,6 +107,8 @@ struct termios {
 #define CRTSCTS 0x1000
 #define CBAUD	0x000F
 
+#define _CSYS	(CREAD|HUPCL|CLOCAL)
+
 #define ECHO	0x0001	/* Supported */
 #define ECHOE	0x0002	/* Supported */
 #define ECHOK	0x0004	/* Supported */
@@ -113,6 +119,8 @@ struct termios {
 #define NOFLSH	0x0080
 #define TOSTOP	0x0100
 #define XCASE	0x0200
+
+#define _LSYS	(ECHO|ECHOE|ECHOK|ICANON|ISIG)
 
 #define TCSANOW		0
 #define TCSADRAIN	1
@@ -152,6 +160,12 @@ struct termios {
 #define VTATTRS		0x24
 #define KBRATE		0x25
 
+#define VTFONTINFO	0x30
+#define VTSETFONT	(0x31|IOCTL_SUPER)
+#define VTGETFONT	0x32
+#define VTSETUDG	0x33
+#define VTGETUDG	0x34
+
 /* Fuzix systems to level 2 have 256 byte tty buffers as per standards, level 1
    boxes may not */
 #if defined(CONFIG_LEVEL_2)
@@ -170,6 +184,22 @@ struct winsize {		/* Keep me 8bytes on small boxes */
     unsigned short ws_ypixel;
 };
 
+struct fontinfo {
+    uint8_t font_low;
+    uint8_t font_high;
+    uint8_t udg_low;
+    uint8_t udg_high;
+    uint8_t format;
+#define FONT_INFO_8X8	0
+#define FONT_INFO_6X8	1
+#define FONT_INFO_4X8	2	/* packed twice in each byte */
+#define FONT_INFO_4X6	3
+#define FONT_INFO_8X11P16  4	/* 8 x 11 but packed 16 line packed */
+#define FONT_INFO_8X16	5
+#define FONT_INFO_6X12P16  6	/* 6x12 on 16 byte boundaries
+				   16 line packed, low 6 bits */
+};
+
 /* Group the tty into a single object. That lets 8bit processors keep all
    the data indexed off a single register */
 struct tty {
@@ -181,6 +211,7 @@ struct tty {
 #define TTYF_STOP	1
 #define TTYF_DISCARD	2
 #define TTYF_DEAD	4
+ /* FIXME add TTYF_SLEEPING 8 here so can generalize code */
     uint16_t pgrp;
     struct termios termios;
     struct winsize winsize;	/* 8 byte so takes us up to 32 */
@@ -189,39 +220,43 @@ struct tty {
 #define CTRL(x)		((x)&0x1F)
 
 extern struct tty ttydata[NUM_DEV_TTY + 1];
+extern tcflag_t termios_mask[NUM_DEV_TTY + 1];
 
 extern void tty_init(void);
 
-extern int tty_read(uint8_t minor, uint8_t rawflag, uint8_t flag);
-extern int tty_write(uint8_t minor, uint8_t rawflag, uint8_t flag);
-extern int tty_open(uint8_t minor, uint16_t flag);
-extern int tty_close(uint8_t minor);
-extern int tty_ioctl(uint8_t minor, uarg_t request, char *data);
+extern int tty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+extern int tty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+extern int tty_open(uint_fast8_t minor, uint16_t flag);
+extern int tty_close(uint_fast8_t minor);
+extern int tty_ioctl(uint_fast8_t minor, uarg_t request, char *data);
+
+#define tty_pending(minor) ttyinq[(uint8_t)(minor)].q_count
 
 extern void tty_exit(void);
-extern void tty_post(inoptr ino, uint8_t minor, uint16_t flag);
+extern void tty_post(inoptr ino, uint_fast8_t minor, uint16_t flag);
 
-extern void tty_hangup(uint8_t minor);
-extern void tty_carrier_drop(uint8_t minor);
-extern void tty_carrier_raise(uint8_t minor);
+extern void tty_hangup(uint_fast8_t minor);
+extern void tty_carrier_drop(uint_fast8_t minor);
+extern void tty_carrier_raise(uint_fast8_t minor);
 
-extern int ptty_read(uint8_t minor, uint8_t rawflag, uint8_t flag);
-extern int ptty_write(uint8_t minor, uint8_t rawflag, uint8_t flag);
-extern int ptty_open(uint8_t minor, uint16_t flag);
-extern int ptty_close(uint8_t minor);
-extern int ptty_ioctl(uint8_t minor, uint16_t request, char *data);
+extern int ptty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+extern int ptty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+extern int ptty_open(uint_fast8_t minor, uint16_t flag);
+extern int ptty_close(uint_fast8_t minor);
+extern int ptty_ioctl(uint_fast8_t minor, uint16_t request, char *data);
 
-extern int pty_read(uint8_t minor, uint8_t rawflag, uint8_t flag);
-extern int pty_write(uint8_t minor, uint8_t rawflag, uint8_t flag);
-extern int pty_open(uint8_t minor, uint16_t flag);
-extern int pty_close(uint8_t minor);
-extern int pty_ioctl(uint8_t minor, uint16_t request, char *data);
+extern int pty_read(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+extern int pty_write(uint_fast8_t minor, uint_fast8_t rawflag, uint_fast8_t flag);
+extern int pty_open(uint_fast8_t minor, uint16_t flag);
+extern int pty_close(uint_fast8_t minor);
+extern int pty_ioctl(uint_fast8_t minor, uint16_t request, char *data);
 
-extern int tty_inproc(uint8_t minor, unsigned char c);
-extern void tty_outproc(uint8_t minor);
-extern void tty_echo(uint8_t minor, unsigned char c);
-extern void tty_erase(uint8_t minor);
-extern void tty_putc_wait(uint8_t minor, unsigned char c);
+extern uint_fast8_t tty_inproc(uint_fast8_t minor, uint_fast8_t c);
+extern void tty_outproc(uint_fast8_t minor);
+extern void tty_echo(uint_fast8_t minor, uint_fast8_t c);
+extern void tty_erase(uint_fast8_t minor);
+extern uint_fast8_t tty_putc_maywait(uint_fast8_t minor, uint_fast8_t, uint_fast8_t flags);
+extern void tty_putc_wait(uint_fast8_t minor, uint_fast8_t c);
 
 typedef enum {
     TTY_READY_NOW=1,    /* port is ready immediately */
@@ -231,30 +266,31 @@ typedef enum {
 
 /* provided by platform */
 extern struct s_queue ttyinq[NUM_DEV_TTY + 1];
-extern ttyready_t tty_writeready(uint8_t minor);
-extern void tty_sleeping(uint8_t minor);
-extern void tty_putc(uint8_t minor, unsigned char c);
-extern void tty_setup(uint8_t minor);
-extern int tty_carrier(uint8_t minor);
+extern ttyready_t tty_writeready(uint_fast8_t minor);
+extern void tty_sleeping(uint_fast8_t minor);
+extern void tty_putc(uint_fast8_t minor, uint_fast8_t c);
+extern void tty_setup(uint_fast8_t minor, uint_fast8_t flags);
+extern int tty_carrier(uint_fast8_t minor);
+extern void tty_data_consumed(uint_fast8_t minor);
 /* PTY pieces: 8 ptys both sides of */
 #ifdef CONFIG_PTY_DEV
 #define PTY_BUFFERS \
-static char pbuf0[TTYSIZ];\
-static char pbuf1[TTYSIZ];\
-static char pbuf2[TTYSIZ];\
-static char pbuf3[TTYSIZ];\
-static char pbuf4[TTYSIZ];\
-static char pbuf5[TTYSIZ];\
-static char pbuf6[TTYSIZ];\
-static char pbuf7[TTYSIZ];\
-static char pbuf8[TTYSIZ];\
-static char pbuf9[TTYSIZ];\
-static char pbufa[TTYSIZ];\
-static char pbufb[TTYSIZ];\
-static char pbufc[TTYSIZ];\
-static char pbufd[TTYSIZ];\
-static char pbufe[TTYSIZ];\
-static char pbuff[TTYSIZ];\
+static uint8_t pbuf0[TTYSIZ];\
+static uint8_t pbuf1[TTYSIZ];\
+static uint8_t pbuf2[TTYSIZ];\
+static uint8_t pbuf3[TTYSIZ];\
+static uint8_t pbuf4[TTYSIZ];\
+static uint8_t pbuf5[TTYSIZ];\
+static uint8_t pbuf6[TTYSIZ];\
+static uint8_t pbuf7[TTYSIZ];\
+static uint8_t pbuf8[TTYSIZ];\
+static uint8_t pbuf9[TTYSIZ];\
+static uint8_t pbufa[TTYSIZ];\
+static uint8_t pbufb[TTYSIZ];\
+static uint8_t pbufc[TTYSIZ];\
+static uint8_t pbufd[TTYSIZ];\
+static uint8_t pbufe[TTYSIZ];\
+static uint8_t pbuff[TTYSIZ];\
 
 #define PTY_QUEUES \
     {pbuf0, pubf0, pubf0, TTYSIZ, 0, TTYSIZ/2}, \

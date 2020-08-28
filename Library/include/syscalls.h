@@ -24,7 +24,11 @@ struct _uzisysinfoblk {
   uint16_t usedk;		/* Used memory in KB */
   uint16_t config;		/* Config flag mask */
   uint16_t loadavg[3];
-  uint32_t spare;
+  uint16_t swapk;
+  uint16_t swapusedk;
+  uint8_t cputype;		/* CPU type information */
+  uint8_t cpu[3];		/* CPU type specific data */
+  uint16_t spare[8];
 };
 
 /*
@@ -46,7 +50,7 @@ struct _uzifilesys {
     uint32_t      s_time;
     uint16_t      s_tfree;
     uint16_t      s_tinode;
-    uint16_t	  s_mntpt;
+    uint8_t	  s_shift;
 };
 
 struct _sockio {
@@ -73,13 +77,16 @@ struct sockaddr_in;
 #define A_SHUTDOWN		1
 #define A_REBOOT		2
 #define A_DUMP			3
-#define A_FREEZE		4	/* Unimplemented, want for NC100 */
+#define A_FREEZE		4	/* Unimplemented, want for NC100? */
 #define A_SWAPCTL		16	/* Unimplemented */
 #define A_CONFIG		17	/* Unimplemented */
 #define A_FTRACE		18	/* Unimplemented:
                                           Hook to the syscall trace debug */
+#define A_SUSPEND               32	/* Suspend to RAM (optional) */
 
-#define AD_NOSYNC		1	/* Unimplemented */
+#define AD_NOSYNC		1
+
+#define A_SC_ADD		1
 
 /* shutdown */
 #define SHUT_RD			0
@@ -120,7 +127,7 @@ extern int brk(void *addr);
 extern void *sbrk(intptr_t increment);
 extern pid_t _fork(uint16_t flags, void *addr);
 extern int mount(const char *dev, const char *path, int flags);
-extern int umount(const char *dev);
+extern int _umount(const char *dev, int flags);
 extern sighandler_t signal(int signum, sighandler_t sighandler);
 extern int dup2(int oldfd, int newfd);
 extern int _pause(unsigned int dsecs);
@@ -157,12 +164,13 @@ extern int listen(int fd, int len);
 extern int bind(int fd, const struct sockaddr *s, int len);
 extern int connect(int fd, const struct sockaddr *s, int len);
 extern int shutdown(int fd, int how);
+extern unsigned int _alarm(unsigned int);
 
 /* asm syscall hooks with C wrappers */
 extern int _getdirent(int fd, void *buf, int len);
 extern int _stat(const char *path, struct _uzistat *s);
 extern int _fstat(int fd, struct _uzistat *s);
-extern int _getfsys(uint16_t dev, struct _uzifilesys *fs);
+extern int _statfs(const char *path, uint8_t *fs);
 extern int _time(__ktime_t *t, uint16_t clock);
 extern int _stime(const __ktime_t *t, uint16_t clock);
 extern int _times(struct tms *t);
@@ -179,7 +187,7 @@ extern int _recvfrom(int fd, char *buf, size_t len, struct _sockio *uaddr);
 /* C library provided syscall emulation */
 extern int stat(const char *path, struct stat *s);
 extern int fstat(int fd, struct stat *s);
-extern int alarm(uint16_t seconds);
+extern unsigned int alarm(unsigned int seconds);
 extern time_t time(time_t *t);
 extern int stime(const time_t *t);
 extern int times(struct tms *tms);

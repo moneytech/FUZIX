@@ -4,12 +4,18 @@
 #include <printf.h>
 #include <devtty.h>
 #include <ttydw.h>
+#include <libc.h>
 
 #define DISC __attribute__((section(".discard")))
 
-unsigned int swapdev = 0;
+uint16_t swapdev = 0;
 struct blkbuf *bufpool_end = bufpool + NBUFS;
 
+DISC
+void platform_copyright(void)
+{
+	kprintf("COCO3 platform Copyright (c) 2015-2018 Brett M. Gordon\n");
+}
 
 void platform_discard(void)
 {
@@ -71,15 +77,19 @@ void pagemap_init(void)
     int max = scanmem();
     
     /*  We have 64 8k pages for a CoCo3 so insert every other one
-     *  into the kernel allocator map.
+     *  into the kernel allocator map, skipping 3f. 3f holds our constant
+     *  page and tty buffers.  This code only works if page nos. are oddly
+     *  aligned after the kernel.
      */
-    for (i = 12; i < max ; i+=2)
+    for (i = 0xb; i < 0x3f; i+=2)
         pagemap_add(i);
+    for (i = 0x40; i < max; i+=2)
+	pagemap_add(i);
     /* add common page last so init gets it */
     pagemap_add(6);
     /* initialize swap pages */
     for (i = 0; i<MAX_SWAPS; i++)
-	swapmap_add(i);
+	swapmap_init(i);
 }
 
 DISC
@@ -98,21 +108,9 @@ uint8_t platform_param(char *p)
 	    swapdev = bootdevice(p+5);
 	    return -1;
 	}
+	if (!strncmp(p,"VTMODE=", 7)){
+	    set_defmode( p );
+	    return -1;
+	}
 	return 0;
 }
-
-#ifdef CONFIG_LEVEL_2
-
-/* We always use 512 byte paths so no special pathbuf needed */
-
-char *pathbuf(void)
-{
-	return tmpbuf();
-}
-
-void pathfree(char *tb)
-{
-	brelse(tb);
-}
-
-#endif

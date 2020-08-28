@@ -24,6 +24,9 @@
 #include <kernel.h>
 #include <kdata.h>
 #include <printf.h>
+#include <exec.h>
+
+#undef DEBUG
 
 #ifdef CONFIG_BANK16
 /*
@@ -116,11 +119,15 @@ int pagemap_alloc( ptptr p ){
 
 /*
  *	Reallocate the maps for a process
+ *
+ *	FIXME: this is a quick hack for non split I/D old style chmem
+ *
+ *	FIXME: review swap case and ENOMEM
  */
-int pagemap_realloc(usize_t size)
+int pagemap_realloc(struct exec *hdr, usize_t size)
 {
 	int8_t have = maps_needed(udata.u_top);
-	int8_t want = maps_needed(size);
+	int8_t want = maps_needed(size + MAPBASE);
 	uint8_t *ptr = (uint8_t *) & udata.u_page;
 	int8_t i;
 	uint8_t update = 0;
@@ -169,9 +176,21 @@ int pagemap_realloc(usize_t size)
 	return 0;
 }
 
+int pagemap_prepare(struct exec *hdr)
+{
+	/* If it is relocatable load it at PROGLOAD */
+	if (hdr->a_base == 0)
+		hdr->a_base = PROGLOAD >> 8;
+	/* If it doesn't care about the size then the size is all the
+	   space we have */
+	if (hdr->a_size == 0)
+		hdr->a_size = (ramtop >> 8) - hdr->a_base;
+	return 0;
+}
+
 usize_t pagemap_mem_used(void)
 {
-	return pfptr << 4;
+	return procmem - (pfptr << 4);
 }
 
 #ifdef SWAPDEV
@@ -180,9 +199,13 @@ usize_t pagemap_mem_used(void)
    used by swapping 16k platforms to procure a common page.
    platforms will have to provide a void copy_common(uint8_t page)
    that copies the current common page to the specified page.
+
+   FIXME: don't assume common always freed last. Probably means always
+   calling copy_common, but this is swap in so it's already slow so this
+   shouldn't be a big deal.
 */
 
-uint8_t get_common()
+uint8_t get_common(void)
 {
 	ptptr p = NULL;
 	/* if current context is dead, then reuse it's common */
@@ -227,7 +250,7 @@ int swapout(ptptr p)
 {
 	uint16_t page = p->p_page;
 	uint16_t blk;
-	uint16_t map;
+	int16_t map;
 	uint16_t base = SWAPBASE;
 	uint16_t size = (0x4000 - SWAPBASE) >> 9;
 	uint16_t i;
@@ -241,7 +264,7 @@ int swapout(ptptr p)
 
 	/* Are we out of swap ? */
 	map = swapmap_alloc();
-	if (map == 0)
+	if (map == -1)
 		return ENOMEM;
 	blk = map * SWAP_SIZE;
 	/* Write the app (and possibly the uarea etc..) to disk */
@@ -300,6 +323,7 @@ void swapin(ptptr p, uint16_t map)
 		else
 			size = 0x20;	/* 16 K */
 	}
+
 #ifdef DEBUG
 	kprintf("%x: swapin done %d\n", p, p->p_page);
 #endif

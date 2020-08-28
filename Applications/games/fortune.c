@@ -6,6 +6,9 @@
 #include <stdint.h>
 #include <time.h>
 
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
 #define COOKIE_JAR	"/usr/games/fortune.dat"
 
 struct f_off {
@@ -32,10 +35,11 @@ int main(int argc, char *argv[])
     exit(1);
   }
   
-  if (read(fd, &cookies, 2) != 2) {
+  if (read(fd, &buf, 2) != 2) {
     perror("read");
     exit(1);
   }
+  cookies = buf[0] + 256 * buf[1];
 
   srand(getpid() ^ getuid() ^ (uint16_t)time(NULL));
   cookie = rand() % cookies;
@@ -50,12 +54,17 @@ int main(int argc, char *argv[])
     exit(1);
   }
 
+  off.off = ntohl(off.off);
+
   if (lseek(fd, off.off, SEEK_SET) == -1) {
     perror("lseek2");
     exit(1);
   }
   
+  off.next = ntohl(off.next);
+
   len = off.next - off.off;
+
   while (len) {
     n = 512;
     if (len < 512)

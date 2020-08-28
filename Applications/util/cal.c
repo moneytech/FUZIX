@@ -48,7 +48,6 @@ static char sccsid[] = "@(#)cal.c	8.4 (Berkeley) 4/2/94";
 #include <time.h>
 
 int time_zone = 0;
-long timezone = 0;
 
 void errx(int exv, char *str)
 {
@@ -235,11 +234,7 @@ void j_yearly(int year)
     printf("\n\n");
     for (i = 0; i < 12; i++)
 	day_array(i + 1, year, days[i]);
-#if 0
     memset(lineout, ' ', sizeof(lineout) - 1);
-#else /* Hi-Tech C */
-    memset(lineout, sizeof(lineout) - 1, ' ');
-#endif
     lineout[sizeof(lineout) - 1] = '\0';
     for (month = 0; month < 12; month += 2) {
 	center(full_month[month], J_WEEK_LEN, J_HEAD_SEP);
@@ -270,11 +265,7 @@ void yearly(int year)
     printf("\n\n");
     for (i = 0; i < 12; i++)
 	day_array(i + 1, year, days[i]);
-#if 0
     memset(lineout, ' ', sizeof(lineout) - 1);
-#else /* Hi-Tech C */
-    memset(lineout, sizeof(lineout) - 1, ' ');
-#endif
     lineout[sizeof(lineout) - 1] = '\0';
     for (month = 0; month < 12; month += 3) {
 	center(full_month[month], WEEK_LEN, HEAD_SEP);

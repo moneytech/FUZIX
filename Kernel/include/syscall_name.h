@@ -2,7 +2,7 @@
 
 #define VARARGS 	-1
 
-char *syscall_name[NR_SYSCALL] = {
+const char *syscall_name[NR_SYSCALL] = {
 	"_exit",
 	"open",
 	"close",
@@ -25,7 +25,7 @@ char *syscall_name[NR_SYSCALL] = {
 	"getppid",
 	"getuid",
 	"umask",
-	"_getfsys",
+	"_statfs",
 	"execve",
 	"_getdirent",
 	"setuid",
@@ -37,11 +37,11 @@ char *syscall_name[NR_SYSCALL] = {
 	"sbrk",
 	"_fork",
 	"mount",
-	"umount",
+	"_umount",
 	"signal",
 	"dup2",
 	"_pause",
-	"alarm",
+	"_alarm",
 	"kill",
 	"pipe",
 	"getgid",
@@ -139,7 +139,7 @@ int syscall_args[NR_SYSCALL] = {
 	1, //sbrk
 	2, //_fork
 	3, //mount
-	1, //umount
+	2, //_umount
 	2, //signal
 	2, //dup2
 	1, //_pause

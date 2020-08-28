@@ -16,13 +16,34 @@ uint8_t *uart_status = (uint8_t *)0xFF05;	/* ACIA status */
 uint8_t *uart_command = (uint8_t *)0xFF06;	/* ACIA command */
 uint8_t *uart_control = (uint8_t *)0xFF07;	/* ACIA control */
 
-unsigned char tbuf1[TTYSIZ];
-unsigned char tbuf2[TTYSIZ];
+static unsigned char tbuf1[TTYSIZ];
+static unsigned char tbuf2[TTYSIZ];
 
 struct s_queue ttyinq[NUM_DEV_TTY + 1] = {	/* ttyinq[0] is never used */
 	{NULL, NULL, NULL, 0, 0, 0},
 	{tbuf1, tbuf1, tbuf1, TTYSIZ, 0, TTYSIZ / 2},
 	{tbuf2, tbuf2, tbuf2, TTYSIZ, 0, TTYSIZ / 2}
+};
+
+static tcflag_t console_mask[4] = {
+	_ISYS,
+	_OSYS,
+	_CSYS,
+	_LSYS
+};
+
+static tcflag_t acia_mask[4] = {
+	_ISYS,
+	_OSYS,
+	/* Review flow control and CSTOPB TODO */
+	_CSYS|CBAUD|CSIZE|PARENB|PARODD|PARMRK,
+	_LSYS
+};
+
+tcflag_t *termios_mask[NUM_DEV_TTY + 1] = {
+	NULL,
+	console_mask,
+	acia_mask
 };
 
 uint8_t vtattr_cap = 0;
@@ -32,7 +53,7 @@ static uint8_t kbd_timer;
 /* tty1 is the screen tty2 is the serial port */
 
 /* Output for the system console (kprintf etc) */
-void kputchar(char c)
+void kputchar(uint8_t c)
 {
 	if (c == '\n')
 		tty_putc(1, '\r');
@@ -63,7 +84,7 @@ void tty_sleeping(uint8_t minor)
     used(minor);
 }
 
-void tty_setup(uint8_t minor)
+void tty_setup(uint8_t minor, uint8_t flags)
 {
 	if (minor == 2) {
 		/* FIXME: do proper mode setting */
@@ -85,6 +106,10 @@ void tty_interrupt(void)
 		r = *uart_data;
 		tty_inproc(2,r);
 	}	
+}
+
+void tty_data_consumed(uint8_t minor)
+{
 }
 
 uint8_t keymap[8];
@@ -230,7 +255,6 @@ void platform_interrupt(void)
 				kbd_timer = keyrepeat.continual;
 			}
 		}
-//                fd_timer_tick();
 		timer_interrupt();
 	}
 }

@@ -31,6 +31,7 @@ struct blkbuf bufpool[NBUFS];
 
 struct p_tab ptab[PTABSIZE];
 struct p_tab *ptab_end;		/* Points to first byte off end */
+struct p_tab *alarms;		/* Linked list of processes with timers */
 struct oft of_tab[OFTSIZE];	/* Open File Table */
 struct cinode i_tab[ITABSIZE];	/* In-core inode table */
 struct mount fs_tab[NMOUNTS];	/* In-core mount table */
@@ -58,7 +59,7 @@ const syscall_t syscall_dispatch[FUZIX_SYSCALL_COUNT] = {
 	_getppid,		/* FUZIX system call 19 */
 	_getuid,		/* FUZIX system call 20 */
 	_umask,			/* FUZIX system call 21 */
-	_getfsys,		/* FUZIX system call 22 */
+	_statfs,		/* FUZIX system call 22 */
 	_execve,		/* FUZIX system call 23 */
 	_getdirent,		/* FUZIX system call 24 */
 	_setuid,		/* FUZIX system call 25 */
@@ -129,6 +130,7 @@ const syscall_t syscall_dispatch[FUZIX_SYSCALL_COUNT] = {
 	_nosys, 	        /* FUZIX system call 78 */
 	_nosys, 	        /* FUZIX system call 79 */
 #endif
+#ifdef CONFIG_NET
 	_nosys,			/* 80-89 reserved */
 	_nosys,
 	_nosys,
@@ -139,7 +141,6 @@ const syscall_t syscall_dispatch[FUZIX_SYSCALL_COUNT] = {
 	_nosys,
 	_nosys,
 	_nosys,
-#ifdef CONFIG_NET		/* For now require L2 */
 	_socket,		/* FUZIX system call 90 */
 	_listen,		/* FUZIX system call 91 */
 	_bind,			/* FUZIX system call 92 */

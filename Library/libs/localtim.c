@@ -4,6 +4,5 @@
 struct tm *localtime(time_t * timep)
 {
 	static struct tm tmb;
-	__tm_conv(&tmb, timep, 0);
-	return &tmb;
+	return localtime_r(timep, &tmb);
 }

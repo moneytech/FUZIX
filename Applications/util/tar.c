@@ -17,23 +17,25 @@
 
 
     NOTES:
-    * no record blocking
     * cannot extract symbolic links
     * hardlinks are added as normal files
-    * no built-in tar file, if option "f" is not set then tar will use
-      stdin/stdout.
 
     TODO:
+    * remove stdio.h gunk
 */
 
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdint.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <getopt.h>
 #include <dirent.h>
 /* #include <time.h> */
 #include <errno.h>
+#include <stdlib.h>
 
 /* tar header format, with ustar extension */
 struct header {
@@ -62,12 +64,57 @@ int infile;			/* input file: a tar file */
 int outfile;			/* output file: a tar file */
 int verbose;			/* verbose flag */
 int uflag;			/* ustar flag */
+int bf = 1;                     /* blocking factor */
+char *rec;                      /* alloced record buffer */
+char *recptr;                   /* ptr to next write */
+char *recend;                   /* ptr to end of buffer */
+int recz;                       /* size of record in bytes */
 char *ofile = NULL;		/* pointer to archive name from cmd line */
 char key = 0;			/* key mode of command (t,x,c) */
 int noreplace = 0;		/* replace old files? */
 int cksum = 1;			/* don't worry about cksums */
 struct stat astat;		/* stat of archive file */
 
+
+/* read blk from record */
+void blkread(void *buf) {
+	int ret;
+	if (recptr == recend) {
+		ret = read(infile, rec, recz);
+		if (ret < recz) {
+			fprintf(stderr,"wrong blocking factor\n");
+			exit(1);
+		}
+		recptr = rec;
+	}
+	memcpy(buf,recptr,512);
+	recptr += 512;
+}
+
+/* write a block to record */
+int blkwrite(char *buf) {
+	int ret;
+	memcpy(recptr, buf, 512);
+	recptr += 512;
+	if (recptr == recend) {
+		ret = write(outfile, rec, recz);
+		if (ret < recz) {
+			fprintf(stderr,"wrong blocking factor\n");
+			exit(1);
+		}
+		recptr = rec;
+	}
+	return 512;
+}
+
+/* flush any partial record */
+int blkflush(void) {
+	if (recptr != rec) {
+		bzero(recptr, recend - recptr);
+		return write(outfile, rec, recz);
+	}
+	return 0;
+}
 
 /* Return a number from an octal string */
 static uint32_t b8get(char *ptr, unsigned int n)
@@ -106,10 +153,7 @@ static void pname(void)
 static void my_chown(void)
 {
 	int x = chown(h.name, b8get(h.uid, 8),
-		      b8get(h.gid, 8)
-	    );
-	if (x < 0)
-		pname();
+		      b8get(h.gid, 8));
 }
 
 
@@ -123,7 +167,7 @@ static void my_chmod(void)
 
 static void printusage(void)
 {
-	fprintf(stderr, "usage: tar [-ckxntv] [-f archive] [file]...\n");
+	fprintf(stderr, "usage: tar [-cbkxntv] [-f archive] [file]...\n");
 	exit(1);
 }
 
@@ -290,7 +334,7 @@ static void storedir(char *name)
 	memset(h.mode, '0', 57);
 	memset(h.major, '0', 16);
 	strcpy(h.name, name);
-	b8put(s.st_mode, h.mode + 8);
+	b8put(s.st_mode & 07777, h.mode + 8);
 	b8put(s.st_uid, h.uid + 8);
 	b8put(s.st_gid, h.gid + 8);
 	b8put(s.st_size, h.size + 12);
@@ -330,7 +374,7 @@ static void storedir(char *name)
 	b8put(cksum_calc(), h.cksum + 7);
 
 	/* write header to file */
-	ret = write(outfile, h.name, 512);
+	ret = blkwrite(h.name);
 	if (ret < 512) {
 		pname();
 		exit(1);
@@ -352,12 +396,9 @@ static void storedir(char *name)
 				fprintf(stderr, "cannot read source file\n");
 				exit(1);
 			}
-			/* !!! should zero rest of buffer here */
-			ret = write(outfile, buffer, 512);
-			if (ret < 512) {
-				fprintf(stderr, "cannot write out file\n");
-				exit(1);
-			}
+			if (ret < 512)
+				bzero(buffer + ret, 512 - ret);
+			ret = blkwrite(buffer);
 		}
 		close(fd);
 		break;
@@ -412,13 +453,7 @@ static void list(void)
 	}
 
 	while (1) {
-		x = read(infile, &h, 512);
-		if (x < 512) {
-			fprintf(stderr, "Bad filesize\n");
-			exit(1);
-		}
-
-
+		blkread(&h);
 		/* check for zero block */
 		if (h.name[0] == 0) {
 			if (!--zcount)
@@ -434,6 +469,23 @@ static void list(void)
 	}			/* block while */
 }
 
+/* Attempt to make all parent directories */
+static void makeparents(char *path)
+{
+	static char c[100];
+	char *s = path;
+	int l;
+	while (1){
+		char *e = index(s,'/');
+		if (!e)
+			return;
+		l = e - path;
+		memcpy(c,path,l);
+		c[l] = 0;
+		mkdir(c,0755);
+		s = e + 1;
+	}
+}
 
 /* Extract all file in archive */
 static void extract(char *argv[])
@@ -452,12 +504,7 @@ static void extract(char *argv[])
 	}
 
 	while (1) {
-		x = read(infile, &h, 512);
-		if (x < 512) {
-			fprintf(stderr, "bad filesize\n");
-			exit(1);
-		}
-
+		blkread(&h);
 		/* check for zero block */
 		if (h.name[0] == 0) {
 			if (!--zcount)
@@ -488,6 +535,8 @@ static void extract(char *argv[])
 		printheader();
 
 		uflag = !strncmp(h.ustar, "ustar", 5);
+
+		makeparents(h.name);
 
 		switch (h.type) {
 		case '1':	/* a hard link */
@@ -552,18 +601,14 @@ static void extract(char *argv[])
 					continue;
 				}
 				/* open output file */
-				outfile = open(h.name, O_CREAT | O_WRONLY);
+				outfile = open(h.name, O_CREAT | O_WRONLY | O_TRUNC, 0700);
 				if (outfile < 0) {
 					pname();
 					break;
 				}
 				/* send buffers to file */
 				for (x = 0; x < count; x++) {
-					i = read(infile, buffer, 512);
-					if (i < 512) {
-						fprintf(stderr, "cannot read source file\n");
-						exit(1);
-					}
+					blkread(buffer);
 					i = write(outfile, buffer, 512);
 					if (i < 512) {
 						fprintf(stderr, "cannot write out file\n");
@@ -571,11 +616,7 @@ static void extract(char *argv[])
 					}
 				}
 				if (rem) {
-					i = read(infile, buffer, 512);
-					if (i < 512) {
-						fprintf(stderr, "cannot read source file\n");
-						exit(1);
-					}
+					blkread(buffer);
 					i = write(outfile, buffer, rem);
 					if (i < rem) {
 						fprintf(stderr, "cannot write out file\n");
@@ -629,11 +670,12 @@ static void create(char *argv[])
 	}
 	/* write out 2 zero blocks */
 	bzero(buffer, 512);
-	x = write(outfile, buffer, 512);
-	x += write(outfile, buffer, 512);
+	x = blkwrite(buffer);
+	x += blkwrite(buffer);
 	if (x != 1024)
 		perror("writing end of archive");
 	/* close outfile */
+	blkflush();
 	close(outfile);
 }
 
@@ -642,7 +684,9 @@ int main(int argc, char *argv[])
 {
 	int o;
 
-	while ((o = getopt(argc, argv, "xtcvnkf:")) > 0) {
+	ofile = getenv("TAPE");
+	
+	while ((o = getopt(argc, argv, "xtcvnkf:b:")) > 0) {
 		switch (o) {
 		case 'x':
 		case 't':
@@ -661,18 +705,37 @@ int main(int argc, char *argv[])
 		case 'n':
 			cksum = 0;
 			break;
+		case 'b':
+			bf = atoi(optarg);
+			if (bf < 1) {
+				fprintf(stderr,"bad blocking factor\n");
+				exit(1);
+			}
+			break;
 		default:
 			printusage();
 		}
 	}
-
+	/* setup record buffer */
+	recz = bf * 512;
+	recptr = rec = sbrk(recz);
+	if (rec == (void *)-1) {
+		fprintf(stderr,"block buffer too large\n");
+		exit(1);
+	}
+	recend = rec + recz;
 	switch (key) {
 	case 'x':
+		recptr = recend;
 		extract(argv);
+		break;
 	case 't':
+		recptr = recend;
 		list();
+		break;
 	case 'c':
 		create(argv);
+		break;
 	default:
 		fprintf(stderr, "tar: option x,c, or t must be used\n");
 		exit(1);

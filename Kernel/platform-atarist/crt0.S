@@ -1,32 +1,27 @@
+#include "../kernel-68000.def"
+
 /*
  *	Need to wipe BSS etc once we figure out our preferred boot method
  */
-		.globl _start, _screenbase
-
 .mri 1
 
-_start:
+start:
 ;
-;		We run from TOS for the moment
-;
-		move.w #2,-(sp)
-		trap #14
-		move.l d0,_screenbase
-		clr.l (sp)
-		move.w #32,-(sp)
-		trap #1
-;
-;		Doesn't return but takes us stop
-;
-		addq.l	#6,sp
-;
-;		And on we go
+;		Ensure interrupts are off
 ;
 		or #$0700,sr
 		/* FIXME: hard coded ugly */
-		move.l #_uarea_block+508,a7
+		move.l #uarea_block+UBLOCK_SIZE,a7
+
+		lea.l __bss_start,a0
+		lea.l __end,a1
+
+wipe_bss:	clr.l (a0)+
+		cmp.l a0,a1
+		bne wipe_bss
+
 		bsr init_early
 		bsr init_hardware
-		bsr _fuzix_main
+		bsr fuzix_main
 		or #$0700,sr
 stop:		bra stop

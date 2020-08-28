@@ -4,27 +4,27 @@
         .module tricks
 
         .globl _ptab_alloc
-        .globl _newproc
+        .globl _makeproc
+	.globl _udata
         .globl _chksigs
         .globl _getproc
-        .globl _trap_monitor
-        .globl trap_illegal
+        .globl _platform_monitor
         .globl _inint
-        .globl _switchout
+        .globl _platform_switchout
         .globl _switchin
         .globl _dofork
         .globl _runticks
         .globl unix_syscall_entry
         .globl map_process
         .globl interrupt_handler
+	.globl _int_disabled
 
         ; imported debug symbols
         .globl outstring, outde, outhl, outbc, outnewline, outchar, outcharhex
 
         .include "socz80.def"
-        .include "../kernel.def"
         .include "kernel.def"
-
+        .include "../kernel-z80.def"
 ;
 ;	These do not need to be in common memory as we don't have to
 ;	pull udata remapping tricks on a 16K banked system. In the case of
@@ -40,9 +40,8 @@
 ; from switchout().
 ; 
 ; This function can have no arguments or auto variables.
-_switchout:
+_platform_switchout:
         di
-        call _chksigs
         ; save machine state
 
         ld hl, #0 ; return code set here is ignored, but _switchin can 
@@ -51,7 +50,7 @@ _switchout:
         push hl ; return code
         push ix
         push iy
-        ld (U_DATA__U_SP), sp ; this is where the SP is restored in _switchin
+        ld (_udata + U_DATA__U_SP), sp ; this is where the SP is restored in _switchin
 
         ; find another process to run (may select this one again)
         call _getproc
@@ -60,7 +59,7 @@ _switchout:
         call _switchin
 
         ; we should never get here
-        call _trap_monitor
+        call _platform_monitor
 
 _switchin:
         di
@@ -104,7 +103,7 @@ _switchin:
 	; ------------- Our stack just left the building ---------------
 
         ; check u_data->u_ptab matches what we wanted
-        ld hl, (U_DATA__U_PTAB) ; u_data->u_ptab
+        ld hl, (_udata + U_DATA__U_PTAB) ; u_data->u_ptab
         or a                    ; clear carry flag
         sbc hl, de              ; subtract, result will be zero if DE==HL
         jr nz, switchinfail
@@ -118,13 +117,14 @@ _switchin:
 
         ; restore machine state -- note we may be returning from either
         ; _switchout or _dofork
-        ld sp, (U_DATA__U_SP)
+        ld sp, (_udata + U_DATA__U_SP)
         pop iy
         pop ix
         pop hl ; return code
 
         ; enable interrupts, if the ISR isn't already running
-        ld a, (U_DATA__U_ININTERRUPT)
+        ld a, (_udata + U_DATA__U_ININTERRUPT)
+	ld (_int_disabled),a
         or a
         ret nz ; in ISR, leave interrupts off
         ei
@@ -134,7 +134,7 @@ switchinfail:
         ld hl, #badswitchmsg
         call outstring
 	; something went wrong and we didn't switch in what we asked for
-        jp _trap_monitor
+        jp _platform_monitor
 
 
 _dofork:
@@ -167,7 +167,7 @@ _dofork:
         ; _switchin which will immediately return (appearing to be _dofork()
 	; returning) and with HL (ie return code) containing the child PID.
         ; Hurray.
-        ld (U_DATA__U_SP), sp
+        ld (_udata + U_DATA__U_SP), sp
 
 	;
 	; We will return on the parent stack with everything copied. We can
@@ -211,11 +211,14 @@ _dofork:
         pop bc
         pop bc
 
+	ld hl,#_udata
+	push hl
         ; Make a new process table entry, etc.
         ld  hl, (fork_proc_ptr)
         push hl
-        call _newproc
+        call _makeproc
         pop bc 
+	pop bc
 
         ; runticks = 0;
         ld hl, #0
@@ -231,7 +234,7 @@ fork_copy:
 	ld de, #P_TAB__P_PAGE_OFFSET
 	add hl, de
 	; parent mapping to be copied
-	ld de, #U_DATA__U_PAGE
+	ld de, #_udata + U_DATA__U_PAGE
 
 ;
 ;	Walk the 16K banks using a generic code pattern

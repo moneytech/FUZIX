@@ -12,13 +12,22 @@ From UZI by Doug Braun and UZI280 by Stefan Nitschke.
 
 #include <stdbool.h>
 
+/* Import the CPU types before the config.h as config.h wants to use types */
+#include "types.h"
 #include "config.h"
+#include "exec.h"
+
 #include "cpu.h"
 
 #include "panic.h"
 
+
 #ifndef NULL
 #define NULL (void *)0
+#endif
+
+#ifndef regptr
+#define regptr
 #endif
 
 #define min(a,b) ( (a) < (b) ? (a) : (b) )
@@ -36,24 +45,42 @@ From UZI by Doug Braun and UZI280 by Stefan Nitschke.
 #define ALIGNDOWN(v) (v)
 #endif
 
+#ifndef FS_MAX_SHIFT
+#define FS_MAX_SHIFT	0
+#endif
+
+/* These work fine for most compilers but can be overriden for those where the
+   resulting code generation is foul */
+#ifndef LOWORD
+#define LOWORD(x)	((uint16_t)(x))
+#endif
+#ifndef HIBYTE32
+#define HIBYTE32(x)	((uint8_t)((x) >> 24))
+#endif
+
+#ifndef CONFIG_BLOCK_SLEEP
+#define i_unlock(x)	do {} while(0)
+#define i_lock(x)	do {} while(0)
+#define i_islocked(x)	do {} while(0)
+#define i_unlock_deref(x)	i_deref(x)
+#define n_open_lock(a,b)	n_open((a),(b))
+#define getinode_lock(x)	getinode(x)
+#endif
+
 #ifdef CONFIG_LEVEL_2
 #include "level2.h"
 #else
 
-#define jobcontrol_in(x,y,z)	0
-#define jobcontrol_out(x,y,z)	0
+#define jobcontrol_in(x,y)	0
+#define jobcontrol_out(x,y)	0
 #define jobcontrol_ioctl(x,y,z)	0
 
 #define limit_exceeded(x,y) (0)
 #define can_signal(p, sig) \
 	(udata.u_ptab->p_uid == (p)->p_uid || super())
-#define pathbuf()	tmpbuf()
-#define pathfree(tb)	brelse(tb)
 #define dump_core(sig)	sig
 #define in_group(x)	0
 #endif
-
-#define CPM_EMULATOR_FILENAME    "/usr/cpm/emulator"
 
 /* Maximum UFTSIZE can be is 16, then you need to alter the O_CLOEXEC code */
 
@@ -78,9 +105,11 @@ From UZI by Doug Braun and UZI280 by Stefan Nitschke.
 #endif
 
 
+/* Default to longer slices. For most ports it's a better choice */
 #ifndef MAXTICKS
-#define MAXTICKS     10   /* Max ticks before switching out (time slice)
-                            default process time slice */
+#define MAXTICKS     (TICKSPERSEC/2)
+                           /* Max ticks before switching out (time slice)
+                              default process time slice */
 #endif
 
 // #define MAXBACK      3   /* Process time slice for tasks not connected
@@ -139,29 +168,52 @@ typedef uint16_t blkno_t;    /* Can have 65536 512-byte blocks in filesystem */
 #define BLKSIZE		512
 #define BLKSHIFT	9
 #define BLKMASK		511
-#define BLKOVERSIZE	25	/* Bits 25+ mean we exceeded the file size */
+#define BLKOVERSIZE32	0xFE	/* Bits 25+ mean we exceeded the file size */
 
 /* Help the 8bit compilers out by preventing any 32bit promotions */
 #define BLKOFF(x)	(((uint16_t)(x)) & BLKMASK)
 
-/* we need a busier-than-busy state for superblocks, so that if those blocks
- * are read by userspace through bread() they are not subsequently freed by 
- * bfree() until the filesystem is unmounted */
+/* State of the block. We have some free bits here if we need them */
 #define BF_FREE		0
 #define BF_BUSY		1
-#define BF_SUPERBLOCK	2
 
-/* FIXME: if we could split the data and the header we could keep blocks
-   outside of our kernel data (as ELKS does) which would be a win, but need
-   some more care on copies, block indexes and directory ops */
+#if !defined(CONFIG_BLKBUF_EXTERNAL)
+#define CONFIG_BLKBUF_HELPERS
+#endif
+
 typedef struct blkbuf {
-    uint8_t     bf_data[BLKSIZE];    /* This MUST be first ! */
+#ifdef CONFIG_BLKBUF_EXTERNAL
+    uint8_t	*__bf_data;
+#else
+    uint8_t     __bf_data[BLKSIZE];    /* This MUST be first ! */
+#endif
     uint16_t    bf_dev;
     blkno_t     bf_blk;
     uint8_t     bf_dirty;	/* bit 0 used */
     uint8_t     bf_busy;	/* bits 0-1 used */
     uint16_t    bf_time;        /* LRU time stamp */
 } blkbuf, *bufptr;
+
+#if defined(CONFIG_BLKBUF_HELPERS)
+#define blktok(kaddr,buf,off,len) \
+    memcpy((kaddr), (buf)->__bf_data + (off), (len))
+#define blkfromk(kaddr,buf, off,len) \
+    memcpy((buf)->__bf_data + (off), (kaddr), (len))
+#define blktou(uaddr,buf,off,len) \
+    uput((buf)->__bf_data + (off), (uaddr), (len))
+#define blkfromu(uaddr,buf,off,len) \
+    uget((uaddr),(buf)->__bf_data + (off), (len))
+#define blkptr(buf, off, len)	((void *)((buf)->__bf_data + (off)))
+#define blkzero(buf)		memset(buf->__bf_data, 0, BLKSIZE)
+#else
+extern void blktok(void *kaddr, struct blkbuf *buf, uint16_t off, uint16_t len);
+extern void blkfromk(void *kaddr, struct blkbuf *buf, uint16_t off, uint16_t len);
+extern void blktou(void *kaddr, struct blkbuf *buf, uint16_t off, uint16_t len);
+extern void blkfromu(void *kaddr, struct blkbuf *buf, uint16_t off, uint16_t len);
+/* Worst case is needing to copy over about 64 bytes */
+extern void *blkptr(struct blkbuf *buf, uint16_t offset, uint16_t len);
+extern void blkzero(struct blkbuf *buf);
+#endif
 
 /* TODO: consider smaller inodes or clever caching. 2BSD uses small
    direct block lists to keep inodes small as they must be in memory when
@@ -171,7 +223,7 @@ typedef struct blkbuf {
    disk safely */
 typedef struct dinode {
     uint16_t i_mode;
-    uint16_t i_nlink;
+    uint16_t i_nlink;		/* Note we have 64K inodes so we never overflow */
     uint16_t i_uid;
     uint16_t i_gid;
     uoff_t    i_size;		/* Never negative */
@@ -239,6 +291,10 @@ typedef struct cinode {
 #define CFLOCK		0x0F	/* flock bits */
 #define CFLEX		0x0F	/* locked exclusive */
 #define CFMAX		0x0E	/* highest shared lock count permitted */
+   uint8_t     c_super;		/* Superblock index */
+#ifdef CONFIG_BLOCK_SLEEP
+   uint16_t    c_lock;		/* inode lock state */
+#endif
 } cinode, *inoptr;
 
 #define NULLINODE ((inoptr)NULL)
@@ -248,17 +304,16 @@ typedef struct cinode {
 #define DIR_LEN		32
 typedef struct direct {
     uint16_t   d_ino;
-    char     d_name[FILENAME_LEN];
+    uint8_t    d_name[FILENAME_LEN];
 } direct;
 
 
 /*
- *	This is actually overlaid over a blkbuf holding the actual
- *	record in question, and pinned until we umount the fs.
+ * Superblock structure
  */
 #define FILESYS_TABSIZE 50
 typedef struct filesys { // note: exists in mem and on disk
-    uint16_t       s_mounted;
+    uint16_t      s_mounted;
     uint16_t      s_isize;
     uint16_t      s_fsize;
     uint16_t      s_nfree;
@@ -266,12 +321,43 @@ typedef struct filesys { // note: exists in mem and on disk
     int16_t       s_ninode;
     uint16_t      s_inode[FILESYS_TABSIZE];
     uint8_t       s_fmod;
+    /* 0 is 'legacy' and never written to disk */
+#define FMOD_GO_CLEAN	0	/* Write a clean to the disk (internal) */
+#define FMOD_DIRTY	1	/* Mounted or uncleanly unmounted from r/w */
+#define FMOD_CLEAN	2	/* Clean. Used internally to mean don't
+				   update the super block */
     uint8_t       s_timeh;	/* bits 32-40: FIXME - wire up */
     uint32_t      s_time;
     blkno_t       s_tfree;
     uint16_t      s_tinode;
-    inoptr        s_mntpt;     /* Mount point */
+    uint8_t	  s_shift;	/* Extent size */
 } filesys, *fsptr;
+
+/*
+ * Superblock with userspace fields that are not kept in the kernel
+ * mount table.
+ */
+struct filesys_user {
+    struct filesys s_fs;
+    /* Allow for some kernel expansion */
+    uint8_t	  s_reserved;
+    uint16_t	  s_reserved2[16];
+    /* This is only used by userspace */
+    uint16_t	  s_props;	/* Property bits indicating which are valid */
+#define S_PROP_LABEL	1
+#define S_PROP_GEO	2
+    /* For now only one property set - geometry. We'll eventually use this
+       when we don't know physical geometry and need to handle stuff with
+       tools etc */
+    uint8_t	  s_label_name[32];
+
+    uint16_t      s_geo_heads;	/* If 0/0/0 is specified and valid it means */
+    uint16_t	  s_geo_cylinders; /* pure LBA - no idea of geometry */
+    uint16_t	  s_geo_sectors;
+    uint8_t	  s_geo_skew;	/* Soft skew if present (for hard sectored media) */
+                                /* Gives the skew (1/2/3/4/5/... etc) */
+    uint8_t	  s_geo_secsize;/* Physical sector size in log2 form*/
+};
 
 typedef struct oft {
     off_t     o_ptr;      /* File position pointer */
@@ -284,11 +370,13 @@ typedef struct oft {
 struct mount {
     uint16_t m_dev;
     uint16_t m_flags;
-    struct filesys *m_fs;
+    inoptr   m_mntpt;     /* Mount point */
+    struct filesys m_fs;
 };
-/* The flags are not yet implemented */
 #define MS_RDONLY	1
-#define MS_NOSUID	2
+#define MS_NOSUID	2	/* Not yet implemented */
+#define MS_NOEXEC	4	/* Not yet implemented */
+#define MS_REMOUNT	128
 
 /* Process table p_status values */
 
@@ -297,14 +385,15 @@ struct mount {
 /* The sleeping range must be together see swap.c */
 #define P_READY         2    /* Runnable   */
 #define P_SLEEP         3    /* Sleeping; can be awakened by signal */
-#define P_STOPPED       4    /* Sleeping, don't wake up for signal */
-#define P_FORKING       5    /* In process of forking; do not mess with */
-#define P_ZOMBIE        6    /* Exited. */
+#define P_IOWAIT	4    /* Sleeping: don't wake for a signal */
+#define P_STOPPED       5    /* Sleeping, signal driven halt */
+#define P_FORKING       6    /* In process of forking; do not mess with */
+#define P_ZOMBIE        7    /* Exited. */
+#define P_NOSLEEP	8    /* In an internal state where sleep is forbidden */
 
 
 /* 0 is used to mean 'check we could signal this process' */
 
-/* FIXME: finish signal handling */
 #define SIGHUP		 1
 #define SIGINT		 2
 #define SIGQUIT		 3
@@ -343,45 +432,55 @@ struct mount {
 #define  SIG_DFL   (int (*)(int))0	/* Must be 0 */
 #define  SIG_IGN   (int (*)(int))1
 
-#define sigmask(sig)    (1UL<<(sig))
+#define sigmask(sig)    (1U<<((sig) & 0x0F))
 
 /* uadmin */
 
 #define A_SHUTDOWN		1
 #define A_REBOOT		2
 #define A_DUMP			3
-#define A_FREEZE		4	/* Unimplemented, want for NC100 */
+#define A_FREEZE		4	/* Unimplemented, want for NC100? */
 #define A_SWAPCTL		16	/* Unimplemented */
 #define A_CONFIG		17	/* Unimplemented */
 #define A_FTRACE		18	/* Unimplemented: 
                                           Hook to the syscall trace debug */
+#define A_SUSPEND               32	/* Suspend to RAM (optional) */
 
-#define AD_NOSYNC		1	/* Unimplemented */
+#define AD_NOSYNC		1
+
+#define A_SC_ADD		1
+
                                           
 /* Process table entry */
+
+struct sigbits {
+    uint16_t	s_pending;
+    uint16_t	s_ignored;
+    uint16_t	s_held;
+};
 
 typedef struct p_tab {
     /* WRS: UPDATE kernel.def IF YOU CHANGE THIS STRUCTURE */
     uint8_t     p_status;       /* Process status: MUST BE FIRST MEMBER OF STRUCT */
+    uint8_t	p_flags;	/* Bitflags: must be adjacent */
+#define PFL_CHKSIG	1	/* Signal check required */
+#define PFL_ALARM	2	/* On alarm queue */
+#define PFL_BATCH	4	/* Used full time quantum */
     uint8_t     p_tty;          /* Process' controlling tty minor # */
     uint16_t    p_pid;          /* Process ID */
     uint16_t    p_uid;
     struct p_tab *p_pptr;      /* Process parent's table entry */
-    uarg_t      p_alarm;        /* Centiseconds until alarm goes off */
+    uarg_t      p_alarm;        /* Deciseconds until alarm goes off */
     uint16_t    p_exitval;      /* Exit value */
     void *      p_wait;         /* Address of thing waited for */
     uint16_t    p_page;         /* Page mapping data */
     uint16_t	p_page2;	/* It's really four bytes for the platform */
-    /* Update kernel.def if you change fields above this comment */
 #ifdef udata
     struct u_data *p_udata;	/* Udata pointer for platforms using dynamic udata */
 #endif
-    /* Everything below here is overlaid by time info at exit.
-	 * Make sure it's 32-bit aligned. */
+    /* Update kernel.def if you change fields above this comment */
     uint16_t    p_priority;     /* Process priority */
-    uint32_t    p_pending;      /* Bitmask of pending signals */
-    uint32_t    p_ignored;      /* Bitmask of ignored signals */
-    uint32_t    p_held;         /* Bitmask of held signals */
+    struct sigbits p_sig[2];
     uint16_t    p_waitno;       /* wait #; for finding longest waiting proc */
     uint16_t    p_timeout;      /* timeout in centiseconds - 1 */
                                 /* 0 indicates no timeout, 1 = expired */
@@ -394,15 +493,17 @@ typedef struct p_tab {
     uint8_t	p_nice;
     uint8_t	p_event;	/* Events */
     usize_t	p_top;		/* Copy of u_top */
+#ifdef CONFIG_LEVEL_2
+    uint16_t	p_session;
+#endif
 #ifdef CONFIG_PROFIL
     uint8_t	p_profscale;
     void *	p_profbuf;
     uaddr_t	p_profsize;
     uaddr_t	p_profoff;
 #endif    
-#ifdef CONFIG_LEVEL_2
-    uint16_t	p_session;
-#endif
+    /* Put new stuff we don't care about in asm or ps at the end */
+    struct p_tab *p_timerq;
 } p_tab, *ptptr;
 
 /*
@@ -451,11 +552,6 @@ typedef struct u_data {
     uint16_t    u_euid;
     uint16_t    u_egid;
     char        u_name[8];      /* Name invoked with */
-    clock_t     u_utime;        /* Elapsed ticks in user mode */
-    clock_t     u_stime;        /* Ticks in system mode */
-    clock_t     u_cutime;       /* Total childrens ticks */
-    clock_t     u_cstime;
-    clock_t     u_time;         /* Start time */
     
     /* This section is not written out except as padding */
     uint8_t     u_files[UFTSIZE];       /* Process file table: indices into open file table, or NO_FILE. */
@@ -470,6 +566,7 @@ typedef struct u_data {
     uint16_t	u_blkoff;	/* Offset in block */
     usize_t	u_nblock;	/* Number of blocks */
     uint8_t	*u_dptr;	/* Address for I/O */
+    usize_t	u_done;		/* Counter for driver methods */
 
 #ifdef CONFIG_LEVEL_2
     uint16_t    u_groups[NGROUP]; /* Group list */
@@ -609,6 +706,8 @@ struct s_argblk {
 #define ENOTCONN	53		/* Transport endpoint is not connected */
 #define EINPROGRESS	54		/* Operation now in progress */
 #define ESHUTDOWN	55		/* Cannot send after transport endpoint shutdown */
+#define EISCONN         56              /* Socket is already connected */
+#define EDESTADDRREQ    57              /* No destination address specified */
 
 /*
  * ioctls for kernel internal operations start at 0x8000 and cannot be issued
@@ -645,7 +744,13 @@ struct s_argblk {
 #define HDIO_GET_IDENTITY	0x0102	/* Not yet implemented anywhere */
 #define BLKFLSBUF		0x4103	/* Use the Linux name */
 #define HDIO_RAWCMD		0x4104	/* Issue a raw command, ioctl data
-					   is device dependant ! */
+                                           is device dependent */
+#define HDIO_EJECT		0x0105	/* Request a media eject */
+
+/*
+ *	Floppy disk ioctl s0x01Fx (see fdc.h)
+ */
+
 /*
  *	Sound ioctls 02xx (see audio.h)
  */
@@ -662,6 +767,44 @@ struct s_argblk {
 /*
  *	Drivewire ioctls 050x (see drivewire.h)
  */
+
+/*
+ *	Input ioctls 0x052x (see input.h)
+ */
+
+/*
+ *	GPIO ioctls 0x053x (see gpio.h)
+ */
+
+/*
+ *	RTC ioctls 0x053x (see rtc.h)
+ */
+
+/*
+ *	Tape ioctls 0x06xx (see tape.h)
+ */
+
+/*
+ *	CPU and platform ioctls (see platform code)
+ *	0700-07		8080-eZ80
+ *			0700	Get kernel CPM hook info
+ *	0708-0F		6502/65C816
+ *	0710-17		6309/809
+ *			0710	Hook SWI2 etc for emulators
+ *	0718-1F		680x0
+ *
+ *	07Ex		Platform specific (check 07F0 before using as will
+ *			be duplicated per platform)
+ *	07Fx		Generic
+ *			07F0	Get platform name string (unique)
+ *				required if have non CPU specific ioctls
+ *			07F1	Cache writeback/flush
+ */
+
+/*
+ *	Printer ioctls 0x08xx (see printer.h)
+ */
+
 
 /*
  *	System info shared with user space
@@ -686,19 +829,29 @@ struct selmap {
 /* functions in common memory */
 
 /* debug functions */
-extern void trap_monitor(void);
 extern void idump(void);
 
 /* platform/device.c */
 extern bool validdev(uint16_t dev);
 
 /* usermem.c */
-extern usize_t valaddr(const char *base, usize_t size);
+#ifdef CONFIG_LEVEL_0
+extern size_t strlcpy(char *, const char *, size_t);
+#define valaddr(a,b)	(1)
+#define uget(a,b,c)	(memcpy(b,a,c) && 0)
+#define uput(a,b,c)	(memcpy(b,a,c) && 0)
+#define ugetc(a)	(*(uint8_t *)(a))
+#define _ugetc(a)	(*(uint8_t *)(a))
+#define ugetw(a)	(*(uint8_t *)(a))
+#define uputc(v, p)	((*(uint8_t*)(p) = (v)) && 0)
+#define uputw(v, p)	((*(uint16_t*)(p) = (v)) && 0)
+#define uzero(a,b)	(memset(a,0,b) && 0)
+#else
+extern usize_t valaddr(const uint8_t *base, usize_t size);
 extern int uget(const void *userspace_source, void *dest, usize_t count);
 extern int16_t  ugetc(const void *userspace_source);
 extern uint16_t ugetw(const void *userspace_source);
 extern uint32_t _ugetl(void *uaddr);
-extern int ugets(const void *userspace_source, void *dest, usize_t maxlen);
 extern int uput (const void *source,   void *userspace_dest, usize_t count);
 extern int uputc(uint16_t value,  void *userspace_dest);	/* u16_t so we don't get wacky 8bit stack games */
 extern int uputw(uint16_t value, void *userspace_dest);
@@ -708,7 +861,6 @@ extern int uzero(void *userspace_dest, usize_t count);
 /* usermem.c or usermem_std.s */
 extern usize_t _uget(const uint8_t *user, uint8_t *dst, usize_t count);
 extern int _uput(const uint8_t *source, uint8_t *user, usize_t count);
-extern int _ugets(const uint8_t *user, uint8_t *dest, usize_t maxlen);
 extern int _uzero(uint8_t *user, usize_t count);
 
 #if defined CONFIG_USERMEM_DIRECT
@@ -717,10 +869,11 @@ extern int _uzero(uint8_t *user, usize_t count);
 #define _uputc(v, p) ((*(uint8_t*)(p) = (v)), 0)
 #define _uputw(v, p) ((*(uint16_t*)(p) = (v)), 0)
 #else
-extern int16_t _ugetc(const uint8_t *user);
-extern uint16_t _ugetw(const uint16_t *user);
+extern int16_t _ugetc(const uint8_t *user) __fastcall;
+extern uint16_t _ugetw(const uint16_t *user) __fastcall;
 extern int _uputc(uint16_t value,  uint8_t *user);
 extern int _uputw(uint16_t value,  uint16_t *user);
+#endif
 #endif
 
 /* platform/tricks.s */
@@ -732,127 +885,133 @@ extern uint8_t need_resched;
 
 /* devio.c */
 extern void validchk(uint16_t dev, const char *p);
-extern uint8_t *bread (uint16_t dev, blkno_t blk, bool rewrite);
-extern void brelse(void *bp);
-extern void bawrite(void *bp);
-extern int bfree(bufptr bp, uint8_t dirty); /* dirty: 0=clean, 1=dirty (write back), 2=dirty+immediate write */
+extern bufptr bread (uint16_t dev, blkno_t blk, bool rewrite);
+extern void brelse(bufptr);
+extern void bawrite(bufptr);
+extern int bfree(bufptr bp, uint_fast8_t dirty); /* dirty: 0=clean, 1=dirty (write back), 2=dirty+immediate write */
 extern void *tmpbuf(void);
-extern void *zerobuf(void);
+extern void tmpfree(void *p);
+extern bufptr zerobuf(void);
 extern void bufsync(void);
 extern bufptr bfind(uint16_t dev, blkno_t blk);
 extern void bdrop(uint16_t dev);
 extern bufptr freebuf(void);
 extern void bufinit(void);
-extern void bufdiscard(bufptr bp);
 extern void bufdump (void);
 extern int bdread(bufptr bp);
 extern int bdwrite(bufptr bp);
-extern int cdread(uint16_t dev, uint8_t flag);
-extern int d_open(uint16_t dev, uint8_t flag);
+extern int cdread(uint16_t dev, uint_fast8_t flag);
+extern int d_open(uint16_t dev, uint_fast8_t flag);
 extern int d_close(uint16_t dev);
 extern int d_ioctl(uint16_t dev, uint16_t request, char *data);
 extern int d_flush(uint16_t dev);
-extern int d_blkoff(uint8_t bits);
-extern int cdwrite(uint16_t dev, uint8_t flag);
-extern bool insq(struct s_queue *q, unsigned char c);
-extern bool remq(struct s_queue *q, unsigned char *cp);
+extern int d_blkoff(uint_fast8_t bits);
+extern int cdwrite(uint16_t dev, uint_fast8_t flag);
+extern bool insq(struct s_queue *q, uint_fast8_t c);
+extern bool remq(struct s_queue *q, uint_fast8_t *cp);
 extern void clrq(struct s_queue *q);
-extern bool uninsq(struct s_queue *q, unsigned char *cp);
-extern int psleep_flags_io(void *event, unsigned char flags, usize_t *n);
-extern int psleep_flags(void *event, unsigned char flags);
-extern int nxio_open(uint8_t minor, uint16_t flag);
-extern int no_open(uint8_t minor, uint16_t flag);
-extern int no_close(uint8_t minor);
-extern int no_rdwr(uint8_t minir, uint8_t rawflag, uint8_t flag);
-extern int no_ioctl(uint8_t minor, uarg_t a, char *b);
+extern bool uninsq(struct s_queue *q, uint_fast8_t *cp);
+extern bool fullq(struct s_queue *q);
+extern int psleep_flags_io(void *event, uint_fast8_t flags);
+extern int psleep_flags(void *event, uint_fast8_t flags);
+extern int nxio_open(uint_fast8_t minor, uint16_t flag);
+extern int no_open(uint_fast8_t minor, uint16_t flag);
+extern int no_close(uint_fast8_t minor);
+extern int no_rdwr(uint_fast8_t minir, uint_fast8_t rawflag, uint_fast8_t flag);
+extern int no_ioctl(uint_fast8_t minor, uarg_t a, char *b);
 
 /* filesys.c */
 /* open file, "name" in user address space */
-extern inoptr n_open(char *uname, inoptr *parent);
-/* open file, "name" in kernel address space */
-extern inoptr kn_open(char *uname, inoptr *parent);
+extern uint8_t lastname[31];
+extern inoptr n_open(uint8_t *uname, inoptr *parent);
 extern inoptr i_open(uint16_t dev, uint16_t ino);
-extern inoptr srch_dir(inoptr wd, char *compname);
+extern inoptr srch_dir(inoptr wd, uint8_t *compname);
 extern inoptr srch_mt(inoptr ino);
-extern bool ch_link(inoptr wd, char *oldname, char *newname, inoptr nindex);
-extern void filename(char *userspace_upath, char *name);
+extern bool emptydir(inoptr ino);
+extern bool ch_link(inoptr wd, uint8_t *oldname, uint8_t *newname, inoptr nindex);
 /* return true if n1 == n2 */
-extern bool namecomp(char *n1, char *n2);
-extern inoptr newfile(inoptr pino, char *name);
+extern bool namecomp(uint8_t *n1, uint8_t *n2);
+extern inoptr newfile(inoptr pino, uint8_t *name);
 extern fsptr getdev(uint16_t dev);
 extern bool baddev(fsptr dev);
 extern uint16_t i_alloc(uint16_t devno);
 extern void i_free(uint16_t devno, uint16_t ino);
 extern blkno_t blk_alloc(uint16_t devno);
 extern void blk_free(uint16_t devno, blkno_t blk);
-extern int8_t oft_alloc(void);
+extern int_fast8_t oft_alloc(void);
 extern void deflock(struct oft *ofptr);
-extern void oft_deref(int8_t of);
+extern void oft_deref(uint_fast8_t of);
 /* returns index of slot, or -1 on failure */
-extern int8_t uf_alloc(void);
+extern int_fast8_t uf_alloc(void);
 /* returns index of slot, or -1 on failure */
-extern int8_t uf_alloc_n(int n);
+extern int_fast8_t uf_alloc_n(uint_fast8_t n);
 #define i_ref(ino) ((ino)->c_refs++, (ino))
 //extern void i_ref(inoptr ino);
 extern void i_deref(inoptr ino);
 extern void wr_inode(inoptr ino);
 extern bool isdevice(inoptr ino);
 extern int f_trunc(inoptr ino);
-extern void freeblk(uint16_t dev, blkno_t blk, uint8_t level);
-extern blkno_t bmap(inoptr ip, blkno_t bn, int rwflg);
+extern void freeblk(uint16_t dev, blkno_t blk, uint_fast8_t level);
+extern blkno_t bmap(inoptr ip, blkno_t bn, unsigned int rwflg);
 extern void validblk(uint16_t dev, blkno_t num);
-extern inoptr getinode(uint8_t uindex);
+extern inoptr getinode(uint_fast8_t uindex);
 extern bool super(void);
 extern bool esuper(void);
 extern uint8_t getperm(inoptr ino);
-extern void setftime(inoptr ino, uint8_t flag);
+extern void setftime(inoptr ino, uint_fast8_t flag);
 extern uint8_t getmode(inoptr ino);
 extern struct mount *fs_tab_get(uint16_t dev);
-/* returns true on failure, false on success */
-extern bool fmount(uint16_t dev, inoptr ino, uint16_t flags);
+extern struct mount *fmount(uint16_t dev, inoptr ino, uint16_t flags);
 extern void magic(inoptr ino);
-extern arg_t unlinki(inoptr ino, inoptr pino, char *fname);
+extern arg_t unlinki(inoptr ino, inoptr pino, uint8_t *fname);
 
 /* inode.c */
-extern void readi(inoptr ino, uint8_t flag);
-extern void writei(inoptr ino, uint8_t flag);
-extern int16_t doclose (uint8_t uindex);
-extern inoptr rwsetup (bool is_read, uint8_t *flag);
+extern void readi(inoptr ino, uint_fast8_t flag);
+extern uint16_t umove(uint16_t n);	/* Probably wants to move ? */
+extern void writei(inoptr ino, uint_fast8_t flag);
+extern int16_t doclose (uint_fast8_t uindex);
+extern inoptr rwsetup (bool is_read, uint_fast8_t *flag);
 extern int dev_openi(inoptr *ino, uint16_t flag);
 extern void sync(void);
 
 /* mm.c */
-extern unsigned int uputsys(unsigned char *from, usize_t size);
-extern unsigned int ugetsys(unsigned char *to, usize_t size);
+extern unsigned int uputblk(bufptr bp, usize_t to, usize_t size);
+extern unsigned int ugetblk(bufptr bp, usize_t from, usize_t size);
 
 /* process.c */
 extern void psleep(void *event);
+extern void psleep_nosig(void *event);
 extern void wakeup(void *event);
 extern void pwake(ptptr p);
 extern ptptr getproc(void);
-extern void newproc(ptptr p);
+extern void makeproc(ptptr p, u_data *u);
 extern ptptr ptab_alloc(void);
-extern void ssig(ptptr proc, uint8_t sig);
-extern uint8_t chksigs(void);
+extern void ssig(ptptr proc, uint_fast8_t sig);
+extern void recalc_cursig(void);
+extern uint_fast8_t chksigs(void);
 extern void program_vectors(uint16_t *pageptr);
-extern void sgrpsig(uint16_t pgrp, uint8_t sig);
+extern void sgrpsig(uint16_t pgrp, uint_fast8_t sig);
 extern void unix_syscall(void);
+extern void ptimer_insert(void);
 extern void timer_interrupt(void);
 extern void doexit (uint16_t val);
 extern void panic(char *deathcry);
 extern void exec_or_die(void);
 #define need_reschedule() (nready != 1 && runticks >= udata.u_ptab->p_priority)
 
+#ifdef CONFIG_LEVEL_2
+extern uint_fast8_t dump_core(uint8_t sig);
+#endif
 
 /* select.c */
 #ifdef CONFIG_LEVEL_2
 extern void seladdwait(struct selmap *s);
 extern void selrmwait(struct selmap *s);
 extern void selwake(struct selmap *s);
-extern void selwait_inode(inoptr i, uint8_t smask, uint8_t setit);
+extern void selwait_inode(inoptr i, uint_fast8_t smask, uint_fast8_t setit);
 extern void selwake_inode(inoptr i, uint16_t mask);
 extern void selwake_pipe(inoptr i, uint16_t mask);
-extern void selwake_dev(uint8_t major, uint8_t minor, uint16_t mask);
+extern void selwake_dev(uint_fast8_t major, uint_fast8_t minor, uint16_t mask);
 extern arg_t _select(void);
 #else
 #define selwait_inode(i,smask,setit) do {} while(0)
@@ -860,6 +1019,9 @@ extern arg_t _select(void);
 #define selwake_pipe(i,smask) do {} while(0)
 #define selwake_dev(major,minor,smask) do {} while(0)
 #endif
+
+/* start.c */
+extern void set_boot_line(const char *p);
 
 /* swap.c */
 extern uint16_t swappage;
@@ -869,23 +1031,23 @@ extern int swapread(uint16_t dev, blkno_t blkno, usize_t nbytes,
 extern int swapwrite(uint16_t dev, blkno_t blkno, usize_t nbytes,
 		     uaddr_t buf, uint16_t page);
 
-extern void swapmap_add(uint8_t swap);
+extern void swapmap_add(uint_fast8_t swap);
+extern void swapmap_init(uint_fast8_t swap);
 extern int swapmap_alloc(void);
 extern ptptr swapneeded(ptptr p, int selfok);
 extern void swapper(ptptr p);
 extern void swapper2(ptptr p, uint16_t map);
-extern uint8_t get_common();
-extern void swap_finish(uint8_t page, ptptr p);
+extern uint8_t get_common(void);
+extern void swap_finish(uint_fast8_t page, ptptr p);
 /* These two are provided by the bank code selected for the port */
 extern int swapout(ptptr p);
 extern void swapin(ptptr p, uint16_t map);
 
 /* syscalls_fs.c, syscalls_proc.c, syscall_other.c etc */
 extern void updoff(void);
-extern int stcpy(inoptr ino, char *buf);
+extern int stcpy(inoptr ino, uint8_t *buf);
 extern bool rargs (char **userspace_argv, struct s_argblk *argbuf);
 extern char **wargs(char *userspace_ptr, struct s_argblk *argbuf, int  *cnt);
-extern arg_t unlinki(inoptr ino, inoptr pino, char *fname);
 
 /* timer.c */
 extern void rdtime(time_t *tloc);
@@ -893,6 +1055,7 @@ extern void rdtime32(uint32_t *tloc);
 extern void wrtime(time_t *tloc);
 extern void updatetod(void);
 extern void inittod(void);
+extern void sync_clock(void);
 
 /* provided by architecture or helpers */
 extern void device_init(void);	/* provided by platform */
@@ -901,16 +1064,43 @@ extern void copy_common(uint8_t page);
 extern void pagemap_add(uint8_t page);	/* FIXME: may need a page type for big boxes */
 extern void pagemap_free(ptptr p);
 extern int pagemap_alloc(ptptr p);
-extern int pagemap_realloc(usize_t p);
+extern int pagemap_prepare(struct exec *hdr);
+extern int pagemap_realloc(struct exec *hdr, usize_t m);
 extern usize_t pagemap_mem_used(void);
 extern void map_init(void);
+extern void set_cpu_type(void);
+
+/* Executable header checks and stubs */
+extern uint8_t sys_cpu, sys_cpu_feat;
+extern uint8_t sys_stubs[];
+
+/* Platform interfaces */
+
 #ifndef platform_discard
 extern void platform_discard(void);
 #endif
+#ifndef platform_copyright
+extern void platform_copyright(void);
+#endif
 extern void platform_idle(void);
-extern uint8_t rtc_secs(void);
-extern void trap_reboot(void);
-extern uint8_t platform_param(char *p);
+extern uint_fast8_t platform_rtc_secs(void);
+extern int platform_rtc_read(void);
+extern int platform_rtc_write(void);
+extern int platform_rtc_ioctl(uarg_t request, char *data);
+extern void platform_reboot(void);
+extern void platform_monitor(void);
+extern uint_fast8_t platform_param(char *p);
+extern void platform_switchout(void);
+extern void platform_interrupt(void);
+extern uint_fast8_t platform_suspend(void);
+extern uint_fast8_t platform_udata_set(ptptr p);
+
+extern void platform_swap_found(uint_fast8_t part, uint_fast8_t letter);
+extern uint_fast8_t platform_canswapon(uint16_t devno);
+
+extern int platform_dev_ioctl(uarg_t request, char *data);
+
+extern uint8_t platform_tick_present;
 
 extern irqflags_t __hard_di(void);
 extern void __hard_irqrestore(irqflags_t f);
@@ -920,11 +1110,14 @@ extern void __hard_ei(void);
 #define di __hard_di
 #define irqrestore __hard_irqrestore
 #define ei __hard_ei
+#else
+extern irqflags_t di(void);
+extern void irqrestore(irqflags_t f);
+extern void ei(void);
 #endif
 
 /* Will need a uptr_t eventually */
 extern uaddr_t ramtop;	     /* Note: ramtop must be in common in some cases */
-extern void platform_interrupt(void);
 extern void invalidate_cache(uint16_t page);
 extern void flush_cache(ptptr p);
 
@@ -950,7 +1143,7 @@ extern arg_t _getpid(void);       /* FUZIX system call 18 */
 extern arg_t _getppid(void);      /* FUZIX system call 19 */
 extern arg_t _getuid(void);       /* FUZIX system call 20 */
 extern arg_t _umask(void);        /* FUZIX system call 21 */
-extern arg_t _getfsys(void);      /* FUZIX system call 22 */
+extern arg_t _statfs(void);       /* FUZIX system call 22 */
 extern arg_t _execve(void);       /* FUZIX system call 23 */
 extern arg_t _getdirent(void);    /* FUZIX system call 24 */
 extern arg_t _setuid(void);       /* FUZIX system call 25 */

@@ -1,6 +1,10 @@
 /*
- *	Very simplistic for now disk swap logic. As we have a fixed
- *	process size at this point we use a fixed swap size too
+ *	For small machines it's cheaper to simply allocate banks in the size
+ *	needed for the largest swapout of the application as that'll be under
+ *	64K. For split I/D we can allocate pairs of swap banks.
+ *
+ *	It's possible to be a lot smarter about this and for 32bit systems
+ *	it becomes a necessity not to use this simple swap logic.
  */
 
 #include <kernel.h>
@@ -16,21 +20,34 @@ uint16_t swappage;			/* Target page */
 
 /* Table of available maps */
 static uint8_t swapmap[MAX_SWAPS];
-static uint8_t swapptr = 0;
+static uint_fast8_t swapptr = 0;
 
-void swapmap_add(uint8_t swap)
+static char maxswap[] = PANIC_MAXSWAP;
+
+void swapmap_add(uint_fast8_t swap)
 {
 	if (swapptr == MAX_SWAPS)
-		panic(PANIC_MAXSWAP);
+		panic(maxswap);
 	swapmap[swapptr++] = swap;
+	sysinfo.swapusedk -= SWAP_SIZE / 2;
 }
 
 int swapmap_alloc(void)
 {
-        if (swapptr)
+        if (swapptr) {
+		sysinfo.swapusedk += SWAP_SIZE / 2;
                 return swapmap[--swapptr];
+	}
         else
-                return 0;
+                return -1;
+}
+
+void swapmap_init(uint_fast8_t swap)
+{
+	if (swapptr == MAX_SWAPS)
+		panic(maxswap);
+	swapmap[swapptr++] = swap;
+	sysinfo.swapk += SWAP_SIZE / 2;
 }
 
 /* We can re-use udata.u_block and friends as we can never be swapped while
@@ -46,6 +63,10 @@ int swapread(uint16_t dev, blkno_t blkno, usize_t nbytes,
 		panic("swprd");
 	udata.u_nblock = nbytes >> BLKSHIFT;
 	swappage = page;
+#ifdef DEBUG
+	kprintf("SR | L %p M %p Bytes %d Page %d Block %d\n",
+		buf, udata.u_dptr, nbytes, page, udata.u_block);
+#endif
 	return ((*dev_tab[major(dev)].dev_read) (minor(dev), 2, 0));
 }
 
@@ -60,6 +81,10 @@ int swapwrite(uint16_t dev, blkno_t blkno, usize_t nbytes,
 		panic("swpwr");
 	udata.u_nblock = nbytes >> BLKSHIFT;
 	swappage = page;
+#ifdef DEBUG
+	kprintf("SW | L %p M %p Bytes %d Page %d Block %d\n",
+		buf, udata.u_dptr, nbytes, page, udata.u_block);
+#endif
 	return ((*dev_tab[major(dev)].dev_write) (minor(dev), 2, 0));
 }
 
@@ -81,13 +106,14 @@ static ptptr swapvictim(ptptr p, int notself)
 
 	c = getproc_nextp;
 
+	/* FIXME: with the punishment flag we ought to also consider that */
 	do {
-		if (c->p_page) {	/* No point swapping someone in swap! */
+		if (c->p_page && c != udata.u_ptab) {	/* No point swapping someone in swap! */
 			/* Find the last entry before us */
 			if (c->p_status == P_READY)
 				r = c;
 			if (c->p_status > P_READY
-			    && p->p_status <= P_FORKING) {
+			    && c->p_status <= P_FORKING) {
 				/* relative position in order of waits, bigger is longer, can wrap but
 				   shouldn't really matter to us much if it does */
 				s = (waitno - c->p_waitno);
@@ -127,9 +153,12 @@ static ptptr swapvictim(ptptr p, int notself)
 ptptr swapneeded(ptptr p, int notself)
 {
 	ptptr n = swapvictim(p, notself);
-	if (n)
+	if (n) {
+		inswap = 1;
 		if (swapout(n))
 			n = NULL;
+		inswap = 0;
+	}
 	return n;
 }
 
@@ -145,6 +174,10 @@ void swapper2(ptptr p, uint16_t map)
 	kprintf("Swapped in %p (page %d), udata.ptab %p\n",
 		p, p->p_page, udata.u_ptab);
 #endif
+	udata.u_page = p->p_page;
+	udata.u_page2 = p->p_page2;
+	/* We booted it out onto disk, don't then not run it */
+	p->p_flags &= ~PFL_BATCH;
 }
 
 /*
@@ -157,7 +190,7 @@ void swapper(ptptr p)
         uint16_t map = p->p_page2;
 	pagemap_alloc(p);	/* May cause a swapout. May also destroy
                                    the old value of p->page2 */
-	return swapper2(p, map);
+	swapper2(p, map);
 }
 
 #endif
